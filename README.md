@@ -1,6 +1,6 @@
 # TaskPe - WhatsApp Task Earning Platform 💰
 
-**TaskPe** is a micro-job web platform where everyday users earn money by completing real WhatsApp tasks (e.g., sending campaign templates to verified business contacts, forwarding webinar invites, or sharing status updates), submitting screenshot proof, and withdrawing their earnings directly to UPI (GPay, PhonePe, Paytm) or Bank accounts.
+**TaskPe** is a micro-job web platform where everyday users earn money by completing real WhatsApp tasks (e.g., sending campaign templates to verified business contacts, forwarding webinar invites, or sharing status updates), submitting screenshot proof, and managing wallet earnings through a controlled withdrawal workflow.
 
 ---
 
@@ -15,10 +15,10 @@
    - Step 2: Recipient numbers list with **1-Click WhatsApp deep links (`https://wa.me/...`)** to open WhatsApp chats with pre-filled message text.
    - Live 15-minute countdown timer.
    - Step 3: Drag-and-drop screenshot uploader with image preview and submission notes.
-5. **Wallet & Instant UPI Withdrawals**:
-   - Live balance tracking and pending earnings breakdown.
-   - Instant withdrawal to UPI (Google Pay, PhonePe, Paytm, BHIM) or IMPS Bank transfer.
-   - Complete transaction history ledger and withdrawal tracking with UTR numbers.
+5. **Wallet & Withdrawal Workflow**:
+   - Available-balance tracking with pending/clearing earnings breakdown.
+   - Transaction ledger for task rewards, referral rewards, and withdrawals.
+   - Withdrawal requests with reservation, status tracking, and manual payout processing.
 6. **Refer & Earn Partner Program**:
    - Unique referral code and shareable link.
    - 1-Click WhatsApp share button.
@@ -33,9 +33,9 @@
    - High-resolution modal lightbox.
    - **1-Click Approve**: Automatically credits the earner's wallet balance and creates an audit ledger record.
    - **1-Click Reject**: Rejects with custom feedback reason and re-opens the task slot.
-2. **Withdrawal Requests Management**:
-   - Approve withdrawal requests with Bank/UPI UTR numbers.
-   - Reject with automatic wallet refund.
+2. **Withdrawal and Payout Management**:
+   - Review withdrawal requests, reservations, refunds, and payout status.
+   - Operate the manual payout queue and payout batches while recording provider references.
 3. **Campaign / Task Creator**:
    - Create and publish new WhatsApp campaigns (Title, Category, Payout, Template text, Target numbers list, Slots, Time limit, Proof requirements).
    - Toggle campaign status (Active / Paused).
@@ -91,13 +91,7 @@ TLS private keys, certificates, or real credentials.
 
 ### 3. Development-only demo credentials
 
-These seeded credentials and one-click demo login are available only when `ENVIRONMENT=development`; they are disabled in production.
-- **Earner Demo**:
-  - Email / Mobile: `earner@taskpe.com` or `9876512345`
-  - Password: `user123`
-- **Admin Demo**:
-  - Email / Mobile: `admin@taskpe.com` or `9876500000`
-  - Password: `admin123`
+Development-only demo credentials are available only when `ENVIRONMENT=development`. Production administrator credentials must be configured securely through environment variables and must never be committed to source control.
 
 ### SMS OTP delivery (Fast2SMS)
 
@@ -105,9 +99,9 @@ TaskPe keeps OTP verification server-side. To deliver real Indian SMS OTPs, set 
 
 ```text
 ENVIRONMENT=production
-SECRET_KEY=your-strong-production-secret
+SECRET_KEY=<configured-securely-in-the-deployment-environment>
 SMS_PROVIDER=fast2sms
-FAST2SMS_API_KEY=your-fast2sms-api-key
+FAST2SMS_API_KEY=<configured-securely-in-the-deployment-environment>
 PAYOUT_MODE=MANUAL
 ```
 
@@ -121,22 +115,36 @@ With `ENVIRONMENT=development` and `SMS_PROVIDER=disabled` (the default), TaskPe
 
 Payout mode is restricted to `MANUAL`; unsupported values stop startup and no automatic cryptocurrency transfer is implemented. State-changing browser requests carry a server-generated CSRF token, while headerless API clients remain compatible. Login, registration, OTP, proof submission, withdrawal, and administrative mutation endpoints have server-side throttles. Proof uploads are checked by image signature in addition to extension, and authenticated/private responses use `Cache-Control: no-store`.
 
+### Finance and payout architecture
+
+TaskPe currently uses a controlled finance workflow consisting of:
+
+- Worker wallets with available and pending/clearing balances.
+- An auditable transaction ledger for task rewards, referral rewards, withdrawals, and related state transitions.
+- Withdrawal reservations so requested funds are not double-spent.
+- Finance settings with immutable audit history and an admin finance dashboard.
+- A manual payout queue and payout batches.
+- USDT as the initial payout method.
+
+`PAYOUT_MODE=MANUAL` is required. Automatic cryptocurrency transfers and automatic real-money payouts are not enabled. Withdrawal requests require manual processing and confirmation; TaskPe does not currently perform instant UPI withdrawals.
+
 ## 📁 Project Structure
 
 ```
 taskpe/
 ├── app.py                  # Flask backend REST API & routing
 ├── database.py             # SQLite schema, connection manager & seed data
-├── taskpe.db               # SQLite database file
+├── .gitignore               # Excludes databases, uploads, secrets, and local artifacts
 ├── requirements.txt        # Python dependencies
-├── test_app.py             # 12-point automated test suite
+├── migrate_*.py             # Explicit database migration scripts
+├── test_*.py                # Automated test suite
 ├── static/
 │   ├── css/styles.css      # Custom styling, animations, WhatsApp accents
 │   └── js/app.js           # Client-side router, WhatsApp links, state manager
 ├── templates/
 │   └── index.html          # Responsive single-page interface
 └── uploads/
-    └── proofs/             # Uploaded screenshot storage directory
+    └── proofs/             # Runtime upload storage; excluded from source control
 ```
 
 ---
