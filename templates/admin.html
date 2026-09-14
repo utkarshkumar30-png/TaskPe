@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
+  <title>TaskPe Admin Control Center</title>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+<div class="admin-shell">
+  <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+  <aside id="admin-sidebar" class="admin-sidebar" aria-label="Admin navigation">
+    <div class="brand"><span class="brand-mark">₹</span><span><strong>TASKPE</strong><small>Admin Control Center</small></span></div>
+    <nav class="side-nav">
+      <button class="side-link is-active" data-section="dashboard" data-tab="dashboard"><span>▦</span>Dashboard</button>
+      <button class="side-link" data-section="users" data-tab="users"><span>♙</span>Users</button>
+      <button class="side-link" data-section="tasks" data-tab="tasks"><span>▤</span>Tasks</button>
+      <button class="side-link" data-section="submissions" data-tab="submissions"><span>✓</span>Submissions</button>
+      <button class="side-link" data-section="withdrawals" data-tab="withdrawals"><span>⇄</span>Withdrawals</button>
+      <button class="side-link" data-section="settings" data-tab="settings"><span>⚙</span>Settings</button>
+    </nav>
+    <div class="sidebar-footer"><span class="admin-badge">ADMIN</span><button id="logout" class="logout-link" type="button">↪ Log out</button></div>
+  </aside>
+  <main class="admin-main">
+    <header class="topbar"><button id="mobile-menu" class="icon-button" type="button" aria-label="Open menu">☰</button><div><p class="eyebrow">TASKPE / ADMIN</p><h1 id="page-title">Dashboard</h1></div><div class="topbar-actions"><span class="status-dot">● Live</span><button id="refresh" class="secondary-button" type="button">↻ <span>Refresh</span></button></div></header>
+    <div class="content"><p id="notice" class="notice" role="status" hidden></p>
+      <section data-panel="dashboard" class="page-section"><div class="section-heading"><div><h2>Good day, Admin</h2><p>Monitor platform activity and review items that need attention.</p></div></div><div id="stats" class="stats-grid" aria-live="polite"></div><div class="attention-card"><div class="section-heading compact"><div><h3>Needs attention</h3><p>Prioritised items from protected admin APIs.</p></div></div><div id="attention" class="attention-grid"></div></div></section>
+      <section data-panel="submissions" class="page-section" hidden><div class="section-heading"><div><h2>Proof submissions</h2><p>Review screenshots and audit results before approving rewards.</p></div><div class="toolbar"><input id="submission-search" class="search-input" placeholder="Search worker or task" aria-label="Search submissions"><select id="submission-status" class="select-input" aria-label="Filter submissions"><option value="all">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="reversed">Reversed</option></select></div></div><div id="submissions" class="table-card"></div></section>
+      <section data-panel="withdrawals" class="page-section" hidden><div class="section-heading"><div><h2>Withdrawals</h2><p>Review payout evidence and server-controlled states.</p></div><div class="toolbar"><input id="withdrawal-search" class="search-input" placeholder="Search user or method" aria-label="Search withdrawals"><select id="withdrawal-status" class="select-input" aria-label="Filter withdrawals"><option value="all">All statuses</option><option value="requested">Requested</option><option value="under_review">Under review</option><option value="approved">Approved</option><option value="processing">Processing</option><option value="paid">Paid</option><option value="rejected">Rejected</option></select></div></div><div id="withdrawals" class="table-card"></div></section>
+      <section data-panel="users" class="page-section" hidden><div class="section-heading"><div><h2>Users</h2><p>Account and wallet overview. Authentication secrets are never exposed.</p></div><input id="user-search" class="search-input" placeholder="Search name, mobile or email" aria-label="Search users"></div><div id="users" class="table-card"></div></section>
+      <section data-panel="tasks" class="page-section" hidden><div class="section-heading"><div><h2>Campaign tasks</h2><p>Manage published campaigns and available slots.</p></div><button id="show-task-form" class="primary-button" type="button">＋ Create task</button></div><form id="task-form" class="form-card" hidden><div class="form-heading"><h3>Create campaign</h3><button type="button" class="icon-button close-form" aria-label="Close">×</button></div><div class="form-grid"><label>Title<input name="title" required></label><label>Campaign type<select name="category"><option>Direct Message</option><option>Broadcast</option><option>Status Share</option><option>App Invite</option></select></label><label class="wide">Description<textarea name="description" required></textarea></label><label class="wide">Message template<textarea name="template_text" required></textarea></label><label class="wide">Unique target numbers<textarea name="target_numbers" required placeholder="One number per line"></textarea><small>Provide enough unique numbers for all slots.</small></label><label>Recipients / slot<input name="recipients_per_slot" type="number" min="1" value="25" required></label><label>Total slots<input name="total_slots" type="number" min="1" value="1" required></label><label>Time limit (minutes)<input name="time_limit_minutes" type="number" min="1" value="25" required></label><label class="wide">Proof instructions<textarea name="proof_instructions"></textarea></label></div><button class="primary-button" type="submit">Create and publish</button></form><div id="tasks" class="task-grid"></div></section>
+      <section data-panel="settings" class="page-section" hidden><div class="section-heading"><div><h2>Platform settings</h2><p>Backend remains authoritative for payment and automation rules.</p></div></div><form id="settings-form" class="settings-grid"><article class="settings-card"><h3>Payment settings</h3><label>Per-message rate (₹)<input name="per_message_rate" type="number" min="0.01" step="0.01" required></label><label>Minimum withdrawal (₹)<input name="minimum_withdrawal_amount" type="number" min="0.01" step="0.01" required></label><label>USDT INR rate<input name="usdt_inr_rate" type="number" min="0.000001" step="0.000001" required></label><label>USDT network<input name="usdt_network" readonly></label></article><article class="settings-card"><h3>Referral settings</h3><label>Commission percent<input name="referral_commission_percent" type="number" min="0" step="0.01" required></label><label>Referral task limit<input name="referral_limit_tasks" type="number" min="1" step="1" required></label></article><article class="settings-card"><h3>Automation</h3><label class="toggle-label"><input name="auto_approve_enabled" type="checkbox"><span>Auto-approve passed audits</span></label><p class="muted">Only submissions meeting server audit rules are eligible.</p></article><div class="settings-actions"><button class="primary-button" type="submit">Save settings</button></div></form><div class="section-heading compact"><div><h3>Finance settings history</h3><p>Immutable records of successful finance-setting changes.</p></div></div><div id="settings-history" class="task-grid" aria-live="polite"></div></section>
+    </div>
+  </main>
+</div>
+<script>
+  window.__TASKPE_CSRF__ = {{ csrf_token()|tojson }};
+  (() => { const nativeFetch = window.fetch.bind(window); window.fetch = (input, init = {}) => { const method = (init.method || 'GET').toUpperCase(); if (['POST','PUT','PATCH','DELETE'].includes(method)) { const headers = new Headers(init.headers || {}); headers.set('X-CSRF-Token', window.__TASKPE_CSRF__); init = {...init, headers}; } return nativeFetch(input, init); }; })();
+</script>
+<script src="/static/js/admin.js"></script>
+</body>
+</html>

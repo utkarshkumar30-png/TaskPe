@@ -1,0 +1,37 @@
+# TaskPe Windows reverse-proxy template.
+# Copy this file to a host-local Nginx configuration, replace the placeholders,
+# and keep the resulting file and private key outside source control.
+
+upstream taskpe_waitress {
+    server 127.0.0.1:5000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name REPLACE_WITH_PUBLIC_HOSTNAME;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name REPLACE_WITH_PUBLIC_HOSTNAME;
+
+    # Configure these in the host-local copy only. Never commit certificate
+    # paths containing private keys or certificates to the repository.
+    ssl_certificate REPLACE_WITH_HOST_LOCAL_FULLCHAIN_PATH;
+    ssl_certificate_key REPLACE_WITH_HOST_LOCAL_PRIVATE_KEY_PATH;
+
+    location / {
+        proxy_pass http://taskpe_waitress;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+}

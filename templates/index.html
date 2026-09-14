@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TaskPe - WhatsApp Task Earning Platform | Earn ₹500–₹1,500 Daily</title>
+  <!-- Google Fonts: Inter & Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- FontAwesome 6 CDN -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              wa: '#25D366',
+              waDark: '#128C7E',
+              waDeep: '#075E54',
+              emerald: '#10B981',
+              dark: '#0B1120',
+              card: '#1E293B',
+              border: '#334155'
+            }
+          },
+          fontFamily: {
+            heading: ['"Plus Jakarta Sans"', 'sans-serif'],
+            sans: ['Inter', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-[#0B1120] text-slate-100 min-h-screen flex flex-col antialiased selection:bg-emerald-500 selection:text-white">
+
+  <!-- TOP NAVBAR -->
+  <header class="sticky top-0 z-40 glass-nav transition-all">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        
+        <!-- Brand Logo -->
+        <div class="flex items-center gap-3 cursor-pointer" onclick="navigate('home')">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-green-400 flex items-center justify-center text-white shadow-lg glow-wa-sm">
+            <i class="fa-brands fa-whatsapp text-2xl"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-xl font-extrabold font-heading tracking-tight text-white">Task<span class="text-emerald-400">Pe</span></span>
+              <span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.2 bg-emerald-500/20 text-emerald-400 rounded border border-emerald-500/30">Earn</span>
+            </div>
+            <p class="text-[10px] text-slate-400 -mt-1">WhatsApp Micro-Jobs</p>
+          </div>
+        </div>
+
+        <!-- Navigation Links (Desktop) -->
+        <nav class="hidden md:flex items-center space-x-1 lg:space-x-2">
+          <button onclick="navigate('home')" id="nav-home" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Home</button>
+          <button onclick="navigate('tasks')" id="nav-tasks" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Tasks</button>
+          <button onclick="navigate('wallet')" id="nav-wallet" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Wallet & UPI</button>
+          <button onclick="navigate('refer')" id="nav-refer" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Refer & Earn</button>
+          <button onclick="navigate('leaderboard')" id="nav-leaderboard" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Leaderboard</button>
+          <a href="/admin" id="nav-admin" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-purple-300 hover:text-white hover:bg-purple-900/40 border border-purple-500/30 transition hidden">Admin Dashboard</a>
+        </nav>
+
+        <!-- Right User Actions -->
+        <div class="flex items-center gap-3">
+          <!-- Logged Out View -->
+          <div id="auth-buttons-logged-out" class="flex items-center gap-2">
+            <button onclick="openAuthModal('login')" class="px-3.5 py-1.5 text-sm font-semibold text-slate-300 hover:text-white transition">
+              Log In
+            </button>
+            <button onclick="openAuthModal('signup')" class="px-4 py-2 rounded-xl text-sm font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md shadow-emerald-500/25 transition">
+              Sign Up
+            </button>
+          </div>
+
+          <!-- Logged In View -->
+          <div id="auth-buttons-logged-in" class="hidden flex items-center gap-3">
+            <!-- Wallet Pill -->
+            <div onclick="navigate('wallet')" class="cursor-pointer flex items-center bg-slate-800/90 border border-emerald-500/40 rounded-xl px-3 py-1.5 hover:border-emerald-400 transition group shadow-sm">
+              <div class="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs mr-2 group-hover:scale-110 transition">
+                <i class="fa-solid fa-wallet"></i>
+              </div>
+              <div>
+                <div class="text-[10px] text-slate-400 leading-tight">Balance</div>
+                <div class="text-sm font-bold text-emerald-400 leading-tight">₹<span id="nav-wallet-balance">0.00</span></div>
+              </div>
+            </div>
+
+            <!-- Profile Menu -->
+            <div class="relative">
+              <button onclick="toggleUserDropdown()" class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-slate-800 border border-slate-700/80 transition">
+                <div class="w-8 h-8 rounded-lg bg-slate-700 text-emerald-400 flex items-center justify-center font-bold text-sm">
+                  <span id="nav-user-initial">U</span>
+                </div>
+                <span id="nav-user-name" class="text-sm font-semibold text-slate-200 hidden sm:inline max-w-[100px] truncate">User</span>
+                <i class="fa-solid fa-chevron-down text-xs text-slate-400"></i>
+              </button>
+
+              <!-- Dropdown Panel -->
+              <div id="user-dropdown-menu" class="hidden absolute right-0 mt-2 w-52 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl py-2 z-50">
+                <div class="px-4 py-2 border-b border-slate-800">
+                  <p class="text-xs text-slate-400">Signed in as</p>
+                  <p id="dropdown-user-email" class="text-xs font-semibold text-white truncate">email@example.com</p>
+                  <span id="dropdown-user-role" class="inline-block mt-1 text-[10px] px-2 py-0.5 rounded font-bold uppercase bg-slate-800 text-slate-300">Earner</span>
+                </div>
+                <button onclick="navigate('tasks')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-solid fa-list-check text-emerald-400 w-4"></i> Tasks List
+                </button>
+                <button onclick="navigate('wallet')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-solid fa-money-bill-transfer text-emerald-400 w-4"></i> Wallet & Withdraw
+                </button>
+                <button onclick="navigate('refer')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-solid fa-users text-emerald-400 w-4"></i> Refer Friends
+                </button>
+                <button onclick="navigate('leaderboard')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-solid fa-trophy text-amber-400 w-4"></i> Leaderboard
+                </button>
+                <button onclick="showToast('For help, contact TaskPe support from your registered email.', 'info')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-solid fa-circle-question text-blue-400 w-4"></i> Help & Support
+                </button>
+                <div class="border-t border-slate-800 my-1"></div>
+                <button onclick="logout()" class="w-full text-left px-4 py-2 text-xs font-medium text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2">
+                  <i class="fa-solid fa-arrow-right-from-bracket w-4"></i> Log Out
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- LIVE EARNINGS TICKER -->
+  <div class="bg-slate-900/90 border-b border-slate-800/80 py-2 px-4 overflow-hidden text-xs">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 live-dot"></span>
+        <span class="font-bold text-emerald-400 uppercase text-[10px] tracking-wider">Live Payouts</span>
+      </div>
+      <div class="marquee-wrapper overflow-hidden relative flex-1 text-slate-400 text-xs">
+        <div class="inline-flex space-x-8 animate-pulse text-[11px]">
+          <span>⚡ <b class="text-white">Rohan S.</b> completed Task #1 (<span class="text-emerald-400 font-semibold">+₹70.00</span>)</span>
+          <span>⚡ <b class="text-white">Priya P.</b> withdrew <span class="text-emerald-400 font-semibold">₹120.00</span> via UPI</span>
+          <span>⚡ <b class="text-white">Amit K.</b> earned <span class="text-emerald-400 font-semibold">₹80.00</span> on Webinar Broadcast</span>
+          <span>⚡ <b class="text-white">Sneha M.</b> earned a <span class="text-emerald-400 font-semibold">10% lifetime referral commission</span></span>
+          <span>⚡ <b class="text-white">Vikram J.</b> withdrew <span class="text-emerald-400 font-semibold">₹250.00</span> to Google Pay</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN VIEW CONTAINER -->
+  <main class="flex-1">
+
+    <!-- ============================================== -->
+    <!-- VIEW 1: HOME / LANDING PAGE                    -->
+    <!-- ============================================== -->
+    <section id="view-home" class="py-12 sm:py-16">
+      <!-- Hero -->
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold mb-6">
+          <i class="fa-brands fa-whatsapp text-sm"></i> #1 WhatsApp Micro-Job Platform in India
+        </div>
+        <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold font-heading tracking-tight leading-tight mb-6">
+          Earn <span class="text-gradient-wa">₹500 to ₹1,500</span> Daily<br class="hidden sm:inline"> from WhatsApp Tasks
+        </h1>
+        <p class="max-w-2xl mx-auto text-base sm:text-lg text-slate-300 mb-8 font-normal">
+          Send campaign templates and promo links to verified numbers from your phone. Submit screenshot proof and withdraw your earnings directly to UPI (GPay / PhonePe / Paytm).
+        </p>
+
+        <div class="flex flex-wrap items-center justify-center gap-4 mb-12">
+          <button onclick="navigate('tasks')" class="px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-base shadow-xl glow-wa transition transform hover:-translate-y-0.5 flex items-center gap-2">
+            <i class="fa-solid fa-bolt"></i> Start Earning Now
+          </button>
+        </div>
+
+        <!-- Trust Stats Strip -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto mb-16">
+          <div class="glass-card p-4 rounded-2xl">
+            <div class="text-2xl sm:text-3xl font-extrabold text-white font-heading">₹70–₹90</div>
+            <div class="text-xs text-slate-400 mt-1">Average Task Payout</div>
+          </div>
+          <div class="glass-card p-4 rounded-2xl">
+            <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 font-heading">3 Mins</div>
+            <div class="text-xs text-slate-400 mt-1">Average Time Per Task</div>
+          </div>
+          <div class="glass-card p-4 rounded-2xl">
+            <div class="text-2xl sm:text-3xl font-extrabold text-white font-heading">Instant UPI</div>
+            <div class="text-xs text-slate-400 mt-1">Fast Withdrawals</div>
+          </div>
+          <div class="glass-card p-4 rounded-2xl">
+            <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 font-heading">100% Free</div>
+            <div class="text-xs text-slate-400 mt-1">Zero Joining Fee</div>
+          </div>
+        </div>
+
+        <!-- 3-STEP PROCESS -->
+        <div class="py-12 border-t border-slate-800/80">
+          <div class="text-center mb-12">
+            <h2 class="text-2xl sm:text-3xl font-bold font-heading text-white">How TaskPe Works in 3 Steps</h2>
+            <p class="text-sm text-slate-400 mt-2">No complicated skills required. If you use WhatsApp, you can earn.</p>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-left">
+            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
+              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
+                01
+              </div>
+              <h3 class="text-lg font-bold text-white mb-2">Pick a WhatsApp Task</h3>
+              <p class="text-sm text-slate-400">Choose from available tasks like promotional messages, webinar links, or status updates with payouts up to ₹90 each.</p>
+            </div>
+
+            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
+              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
+                02
+              </div>
+              <h3 class="text-lg font-bold text-white mb-2">Send Using Direct Link</h3>
+              <p class="text-sm text-slate-400">Copy our pre-written template and click our 1-click WhatsApp deep link to instantly open chats with the message pre-filled.</p>
+            </div>
+
+            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
+              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
+                03
+              </div>
+              <h3 class="text-lg font-bold text-white mb-2">Upload Proof & Get Paid</h3>
+              <p class="text-sm text-slate-400">Snap a quick screenshot showing sent double ticks, upload it, and get paid directly into your TaskPe wallet to withdraw via UPI.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- EARNINGS CALCULATOR -->
+        <div class="my-12 glass-card p-8 rounded-3xl max-w-3xl mx-auto border-emerald-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-white font-heading">Calculate Your Monthly Earnings</h3>
+            <span class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400">Interactive</span>
+          </div>
+          <p class="text-sm text-slate-400 text-left mb-6">See how much you can make daily and monthly by doing simple WhatsApp tasks in your free time:</p>
+
+          <div class="text-left mb-6">
+            <div class="flex justify-between items-center mb-2">
+              <label for="tasks-calc-slider" class="text-sm font-semibold text-slate-300">Tasks Completed Per Day:</label>
+              <span id="calc-tasks-label" class="text-lg font-extrabold text-emerald-400">10 Tasks / Day</span>
+            </div>
+            <input type="range" id="tasks-calc-slider" min="1" max="25" value="10" class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500" oninput="updateCalculator(this.value)">
+            <div class="flex justify-between text-[11px] text-slate-400 mt-1">
+              <span>1 Task (10 mins)</span>
+              <span>10 Tasks (1 hour)</span>
+              <span>25 Tasks (2.5 hours)</span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-4 pt-4 border-t border-slate-700">
+            <div class="bg-slate-900/80 p-4 rounded-xl text-center">
+              <div class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Daily Potential</div>
+              <div id="calc-daily-earning" class="text-2xl sm:text-3xl font-black text-white font-heading mt-1">₹700</div>
+            </div>
+            <div class="bg-emerald-950/40 border border-emerald-500/30 p-4 rounded-xl text-center">
+              <div class="text-xs text-emerald-400 uppercase tracking-wider font-semibold">Monthly Potential</div>
+              <div id="calc-monthly-earning" class="text-2xl sm:text-3xl font-black text-emerald-400 font-heading mt-1">₹21,000</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- FAQ SECTION -->
+        <div class="py-12 border-t border-slate-800/80 text-left max-w-3xl mx-auto">
+          <h2 class="text-2xl font-bold font-heading text-white text-center mb-8">Frequently Asked Questions</h2>
+          <div class="space-y-4">
+            <div class="glass-card p-4 rounded-xl">
+              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> How do I receive my earnings?</h4>
+              <p class="text-xs text-slate-400">Earnings are credited immediately upon admin proof approval. You can request a payout anytime to your UPI ID (Google Pay, PhonePe, Paytm, or BHIM). The current minimum is shown in the withdrawal form.</p>
+            </div>
+            <div class="glass-card p-4 rounded-xl">
+              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> Does TaskPe charge any registration fees?</h4>
+              <p class="text-xs text-slate-400">No, TaskPe is 100% free forever. We never ask for any deposits, fees, or commissions from earners.</p>
+            </div>
+            <div class="glass-card p-4 rounded-xl">
+              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> What kind of proof is required?</h4>
+              <p class="text-xs text-slate-400">A clear screenshot of your WhatsApp chat screen showing the sent promotional message and recipient numbers with message delivered indicators (double ticks).</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 2: TASKS / EARNER DASHBOARD               -->
+    <!-- ============================================== -->
+    <section id="view-tasks" class="hidden py-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      
+      <!-- User Summary Cards (When Logged In) -->
+      <div id="earner-stats-strip" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div class="glass-card p-5 rounded-2xl border-emerald-500/30 relative overflow-hidden">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs font-medium text-slate-400">Wallet Balance</p>
+              <h3 class="text-2xl sm:text-3xl font-black text-emerald-400 mt-1 font-heading">₹<span id="stat-wallet-bal">0.00</span></h3>
+            </div>
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+              <i class="fa-solid fa-wallet text-lg"></i>
+            </div>
+          </div>
+          <button onclick="navigate('wallet')" class="mt-3 text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1">
+            Withdraw via UPI <i class="fa-solid fa-arrow-right text-[10px]"></i>
+          </button>
+        </div>
+
+        <div class="glass-card p-5 rounded-2xl">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs font-medium text-slate-400">Total Lifetime Earned</p>
+              <h3 class="text-2xl sm:text-3xl font-black text-white mt-1 font-heading">₹<span id="stat-total-earned">0.00</span></h3>
+            </div>
+            <div class="w-10 h-10 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center">
+              <i class="fa-solid fa-chart-line text-lg"></i>
+            </div>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">From completed tasks & referrals</p>
+        </div>
+
+        <div class="glass-card p-5 rounded-2xl">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs font-medium text-slate-400">Tasks Completed</p>
+              <h3 class="text-2xl sm:text-3xl font-black text-white mt-1 font-heading"><span id="stat-tasks-done">0</span></h3>
+            </div>
+            <div class="w-10 h-10 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center">
+              <i class="fa-solid fa-check-double text-lg"></i>
+            </div>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">Approved submissions</p>
+        </div>
+
+        <div class="glass-card p-5 rounded-2xl">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs font-medium text-slate-400">Pending Review</p>
+              <h3 class="text-2xl sm:text-3xl font-black text-amber-400 mt-1 font-heading">₹<span id="stat-pending-amt">0.00</span></h3>
+            </div>
+            <div class="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+              <i class="fa-solid fa-hourglass-half text-lg"></i>
+            </div>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">Verifying within 30 mins</p>
+        </div>
+      </div>
+
+      <!-- Task Filter and Header -->
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+        <div>
+          <h2 class="text-2xl font-bold font-heading text-white flex items-center gap-2">
+            Available WhatsApp Tasks
+            <span id="tasks-count-badge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold border border-emerald-500/30">5 Tasks</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-1">Select a task, forward message templates, submit proof, and earn instant cash.</p>
+        </div>
+
+        <!-- Filter Chips -->
+        <div class="flex flex-wrap items-center gap-2" id="task-filter-container">
+          <button onclick="filterTasks('all')" class="filter-btn active px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition" data-cat="all">All</button>
+          <button onclick="filterTasks('Direct Message')" class="filter-btn px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-cat="Direct Message">Direct DM</button>
+          <button onclick="filterTasks('Broadcast')" class="filter-btn px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-cat="Broadcast">Broadcast</button>
+          <button onclick="filterTasks('App Invite')" class="filter-btn px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-cat="App Invite">App Invites</button>
+          <button onclick="filterTasks('Status Share')" class="filter-btn px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-cat="Status Share">Status Share</button>
+        </div>
+      </div>
+
+      <!-- Tasks Grid -->
+      <div id="tasks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Dynamically rendered via JS -->
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 3: TASK DETAIL & EXECUTION PAGE           -->
+    <!-- ============================================== -->
+    <section id="view-task-detail" class="hidden py-8 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <button onclick="navigate('tasks')" class="text-xs text-slate-400 hover:text-white mb-4 flex items-center gap-1.5 transition">
+        <i class="fa-solid fa-arrow-left"></i> Back to All Tasks
+      </button>
+
+      <div class="glass-card rounded-3xl p-6 sm:p-8 border-emerald-500/30">
+        
+        <!-- Top Task Info Header -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span id="detail-task-category" class="px-2.5 py-0.5 rounded text-[11px] font-bold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Direct DM</span>
+              <span class="text-xs text-slate-400"><i class="fa-regular fa-clock mr-1"></i> <span id="detail-task-time">15</span> Mins Limit</span>
+            </div>
+            <h1 id="detail-task-title" class="text-2xl sm:text-3xl font-bold font-heading text-white">Task Title Here</h1>
+            <p id="detail-task-desc" class="text-sm text-slate-300 mt-2">Task description...</p>
+          </div>
+          <div class="text-left sm:text-right shrink-0 bg-slate-900/90 p-4 rounded-2xl border border-slate-800">
+            <div class="text-xs text-slate-400">Payout Reward</div>
+            <div class="text-3xl font-black text-emerald-400 font-heading">₹<span id="detail-task-payout">0.00</span></div>
+            <div class="text-[10px] text-slate-400 mt-0.5">Credited to wallet on approval</div>
+          </div>
+        </div>
+
+        <!-- Task Countdown Timer Bar -->
+        <div class="my-6 bg-slate-900/90 rounded-2xl p-4 border border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-sm font-bold">
+              <i class="fa-solid fa-stopwatch"></i>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">Task Execution Countdown</div>
+              <div class="text-sm font-bold text-slate-200">Submit proof before time expires</div>
+            </div>
+          </div>
+          <div id="task-timer-display" class="text-xl font-mono font-bold text-amber-400 bg-slate-950 px-3 py-1.5 rounded-lg border border-amber-500/30">
+            --:--
+          </div>
+        </div>
+        <button id="cancel-task-btn" type="button" onclick="cancelActiveTask()" class="hidden -mt-3 mb-6 w-full min-h-11 rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 text-xs font-bold hover:bg-red-500 hover:text-white transition">
+          <i class="fa-solid fa-xmark mr-1"></i> Cancel Task &amp; Release Slot
+        </button>
+
+        <!-- Step 1: Copy Message Template -->
+        <div class="mb-8">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center text-xs font-black">1</span>
+              Copy Campaign Template
+            </h3>
+            <button onclick="copyTemplateText()" class="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold transition flex items-center gap-1.5">
+              <i class="fa-regular fa-copy"></i> <span id="copy-btn-label">Copy Template</span>
+            </button>
+          </div>
+          <div class="relative bg-slate-950 rounded-2xl p-4 border border-slate-800 text-sm text-slate-200 font-mono">
+            <p id="detail-template-text" class="whitespace-pre-wrap leading-relaxed">Template message...</p>
+          </div>
+        </div>
+
+        <!-- Step 2: Target Numbers & Direct WhatsApp Deep Links -->
+        <div class="mb-8">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center text-xs font-black">2</span>
+              Send to Verified Numbers
+              <span id="detail-numbers-count" class="text-xs font-semibold text-slate-400">(10 Numbers)</span>
+            </h3>
+            <span class="text-xs text-emerald-400 font-medium">Click each button to open WhatsApp chat</span>
+          </div>
+
+          <div id="detail-numbers-list" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Step 3: Proof Instructions & Upload Form -->
+        <div class="border-t border-slate-800 pt-6">
+          <h3 class="text-base font-bold text-white flex items-center gap-2 mb-3">
+            <span class="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center text-xs font-black">3</span>
+            Upload Screenshot Proof
+          </h3>
+          
+          <div class="bg-slate-900/60 p-4 rounded-xl border border-slate-800 mb-4 text-xs text-slate-300">
+            <span class="font-bold text-emerald-400"><i class="fa-solid fa-circle-info mr-1"></i> Proof Requirement:</span>
+            <span id="detail-proof-instructions">Upload screenshot showing sent message with double tick delivery status.</span>
+          </div>
+
+          <!-- Existing submission status if user already submitted -->
+          <div id="existing-submission-banner" class="hidden mb-4 p-4 rounded-2xl border">
+            <!-- Dynamic submission status info -->
+          </div>
+
+          <!-- Submission Form -->
+          <form id="proof-submission-form" onsubmit="submitProofForm(event)" class="space-y-4">
+            <!-- Drag and Drop Dropzone -->
+            <div id="proof-dropzone" onclick="document.getElementById('proof-file-input').click()" class="border-2 border-dashed border-slate-700 hover:border-emerald-500 rounded-2xl p-6 text-center cursor-pointer transition bg-slate-950/50">
+              <input type="file" id="proof-file-input" accept="image/*" multiple class="hidden" onchange="previewProofImage(this)">
+              
+              <div id="dropzone-empty-state">
+                <div class="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto mb-3 text-xl">
+                  <i class="fa-solid fa-cloud-arrow-up"></i>
+                </div>
+                <p class="text-sm font-semibold text-slate-200">Tap to add screenshots</p>
+                <p class="text-xs text-slate-400 mt-1">Choose 1–8 from Gallery or Camera · PNG, JPG, WEBP · Max 16 MB each</p>
+              </div>
+
+              <div id="dropzone-preview-state" class="hidden">
+                <div id="proof-preview-list" class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3"></div>
+                <p id="proof-image-count" class="text-xs text-emerald-400 font-semibold"><i class="fa-solid fa-circle-check"></i> 0 screenshots selected</p>
+                <div class="mt-3 flex justify-center gap-2">
+                  <button type="button" onclick="event.stopPropagation(); document.getElementById('proof-file-input').click()" class="min-h-11 px-4 rounded-xl bg-slate-800 text-slate-100 text-xs font-bold">Add More Screenshot</button>
+                  <button type="button" onclick="event.stopPropagation(); removeProofImage()" class="min-h-11 px-4 rounded-xl bg-red-500/15 text-red-300 text-xs font-bold">Remove All</button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label for="proof-notes" class="block text-xs font-medium text-slate-300 mb-1">Optional Notes / Details</label>
+              <input type="text" id="proof-notes" placeholder="Ex: Sent to all 10 contacts from my primary WhatsApp" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+            </div>
+
+            <button type="submit" id="submit-proof-btn" class="w-full py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-xl glow-wa transition flex items-center justify-center gap-2">
+              <i class="fa-solid fa-paper-plane"></i> Submit Task Proof for ₹<span id="submit-btn-payout">0.00</span>
+            </button>
+          </form>
+
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 4: WALLET & WITHDRAWALS                   -->
+    <!-- ============================================== -->
+    <section id="view-wallet" class="hidden py-8 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+      
+      <!-- Wallet Balance Hero Card -->
+      <div class="glass-card rounded-3xl p-6 sm:p-8 border-emerald-500/30 mb-8 relative overflow-hidden">
+        <div class="absolute -right-12 -top-12 w-64 h-64 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none"></div>
+
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-6 relative z-10">
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+              <p class="text-xs uppercase tracking-wider font-bold text-slate-400">TaskPe Wallet Balance</p>
+            </div>
+            <h1 class="text-4xl sm:text-5xl font-black font-heading text-white mt-1">
+              ₹<span id="wallet-card-balance">0.00</span>
+            </h1>
+            <p class="text-xs text-slate-400 mt-2">Available for immediate UPI or Bank withdrawal</p>
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-3">
+            <button onclick="openWithdrawModal()" class="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-xl glow-wa transition flex items-center justify-center gap-2">
+              <i class="fa-solid fa-paper-plane"></i> Withdraw Money
+            </button>
+            <button onclick="navigate('tasks')" class="px-5 py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm border border-slate-700 transition flex items-center justify-center gap-2">
+              <i class="fa-solid fa-plus text-emerald-400"></i> Earn More
+            </button>
+          </div>
+        </div>
+
+        <!-- Breakdown strip -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-8 pt-6 border-t border-slate-800/80">
+          <div>
+            <span class="text-xs text-slate-400">Total Lifetime Earned</span>
+            <div class="text-lg font-bold text-white font-heading mt-0.5">₹<span id="wallet-breakdown-earned">0.00</span></div>
+          </div>
+          <div>
+            <span class="text-xs text-slate-400">Under Review / Pending</span>
+            <div class="text-lg font-bold text-amber-400 font-heading mt-0.5">₹<span id="wallet-breakdown-pending">0.00</span></div>
+          </div>
+          <div>
+            <span class="text-xs text-slate-400">Total Withdrawn to UPI</span>
+            <div class="text-lg font-bold text-slate-200 font-heading mt-0.5">₹<span id="wallet-breakdown-withdrawn">0.00</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tables: Transactions & Withdrawals -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        <!-- Transaction Ledger -->
+        <div class="glass-card rounded-2xl p-5 border-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-receipt text-emerald-400"></i> Wallet Transactions
+            </h3>
+            <span class="text-xs text-slate-400">Last 20 entries</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th class="pb-2">Description</th>
+                  <th class="pb-2 text-right">Amount</th>
+                  <th class="pb-2 text-right">Balance</th>
+                </tr>
+              </thead>
+              <tbody id="wallet-transactions-tbody" class="divide-y divide-slate-800/60">
+                <!-- Dynamically loaded -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Payout Requests History -->
+        <div class="glass-card rounded-2xl p-5 border-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-money-bill-transfer text-emerald-400"></i> Withdrawal Requests
+            </h3>
+            <span class="text-xs text-slate-400">Status & UTR</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th class="pb-2">Details</th>
+                  <th class="pb-2">Status</th>
+                  <th class="pb-2 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody id="wallet-withdrawals-tbody" class="divide-y divide-slate-800/60">
+                <!-- Dynamically loaded -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 5: ADMIN PANEL                            -->
+    <!-- ============================================== -->
+    <section id="view-admin" class="hidden py-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      
+      <!-- Admin Header -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+              <i class="fa-solid fa-shield-halved mr-1"></i> Admin Portal
+            </span>
+            <span class="text-xs text-slate-400">Internal Management</span>
+          </div>
+          <h1 class="text-2xl sm:text-3xl font-bold font-heading text-white mt-1">Platform Control Center</h1>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="openCreateTaskModal()" class="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg glow-wa transition flex items-center gap-2">
+            <i class="fa-solid fa-plus"></i> Create New WhatsApp Task
+          </button>
+          <button onclick="loadAdminData()" class="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition" title="Refresh data">
+            <i class="fa-solid fa-rotate-right"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Admin KPI Strip -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div class="glass-card p-5 rounded-2xl border-purple-500/30">
+          <p class="text-xs font-medium text-slate-400">Total Registered Earners</p>
+          <h3 id="admin-stat-users" class="text-2xl sm:text-3xl font-black text-white mt-1 font-heading">0</h3>
+        </div>
+        <div class="glass-card p-5 rounded-2xl border-amber-500/30">
+          <p class="text-xs font-medium text-slate-400">Pending Proof Submissions</p>
+          <h3 id="admin-stat-pending-subs" class="text-2xl sm:text-3xl font-black text-amber-400 mt-1 font-heading">0</h3>
+        </div>
+        <div class="glass-card p-5 rounded-2xl border-blue-500/30">
+          <p class="text-xs font-medium text-slate-400">Pending UPI Withdrawals</p>
+          <h3 id="admin-stat-pending-wds" class="text-2xl sm:text-3xl font-black text-blue-400 mt-1 font-heading">0</h3>
+        </div>
+        <div class="glass-card p-5 rounded-2xl border-emerald-500/30">
+          <p class="text-xs font-medium text-slate-400">Total Disbursed (Paid)</p>
+          <h3 class="text-2xl sm:text-3xl font-black text-emerald-400 mt-1 font-heading">₹<span id="admin-stat-disbursed">0.00</span></h3>
+        </div>
+      </div>
+
+      <!-- AI OCR Auditor Status & Auto-Approval Switch -->
+      <div class="glass-card p-4 rounded-2xl border-emerald-500/30 mb-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-lg shadow-sm">
+            <i class="fa-solid fa-robot"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-bold text-white font-heading">AI OCR Screenshot Audit Engine</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Active</span>
+            </div>
+            <p class="text-xs text-slate-300 mt-0.5">Automatically counts recipient numbers, verifies campaign templates, and audits screenshots in real-time.</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end">
+          <div class="text-right">
+            <div class="text-xs font-semibold text-slate-200">Auto-Approve Passed Audits</div>
+            <div class="text-[10px] text-slate-400">Instantly credits wallet if 100% numbers match</div>
+          </div>
+          <button id="btn-toggle-auto-approve" onclick="toggleAutoApproveSetting()" class="px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-2 bg-slate-800 text-slate-300 border border-slate-700">
+            <span id="auto-approve-status-dot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+            <span id="auto-approve-label">OFF (Manual 1-Click)</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="glass-card p-4 rounded-2xl border-slate-800 mb-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 sm:items-end">
+        <div class="flex-1">
+          <label for="per-message-rate" class="block text-xs font-semibold text-slate-200 mb-1">Worker pay per approved message (₹)</label>
+          <input id="per-message-rate" type="number" min="0.01" step="0.01" inputmode="decimal" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" value="3">
+        </div>
+        <div class="flex-1"><label for="referral-commission-percent" class="block text-xs font-semibold text-slate-200 mb-1">Referral commission %</label><input id="referral-commission-percent" type="number" min="0" step="0.01" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" value="10"></div>
+        <div class="flex-1"><label for="minimum-withdrawal-amount" class="block text-xs font-semibold text-slate-200 mb-1">Minimum withdrawal (₹)</label><input id="minimum-withdrawal-amount" type="number" min="0.01" step="0.01" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" value="50"></div>
+        <div class="flex-1"><label for="usdt-inr-rate" class="block text-xs font-semibold text-slate-200 mb-1">USDT/INR rate (₹)</label><input id="usdt-inr-rate" type="number" min="0.01" step="0.000001" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" value="90"></div>
+        <div class="flex-1">
+          <label for="referral-limit-tasks" class="block text-xs font-semibold text-slate-200 mb-1">Referral commission task limit</label>
+          <input id="referral-limit-tasks" type="number" min="1" step="1" inputmode="numeric" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" value="20">
+        </div>
+        <button onclick="savePaymentSettings()" class="min-h-11 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold">Save payment settings</button>
+      </div>
+
+      <!-- Admin Tabs -->
+      <div class="flex border-b border-slate-800 mb-6 space-x-4">
+        <button onclick="switchAdminTab('submissions')" id="admin-tab-submissions" class="admin-tab pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 flex items-center gap-2">
+          <i class="fa-solid fa-list-check"></i> Proof Verification Queue
+        </button>
+        <button onclick="switchAdminTab('withdrawals')" id="admin-tab-withdrawals" class="admin-tab pb-3 text-sm font-medium text-slate-400 hover:text-slate-200 border-b-2 border-transparent flex items-center gap-2">
+          <i class="fa-solid fa-money-bill-wave"></i> Withdrawal Requests
+        </button>
+        <button onclick="switchAdminTab('tasks')" id="admin-tab-tasks" class="admin-tab pb-3 text-sm font-medium text-slate-400 hover:text-slate-200 border-b-2 border-transparent flex items-center gap-2">
+          <i class="fa-solid fa-tasks"></i> Task Campaigns
+        </button>
+        <button onclick="switchAdminTab('users')" id="admin-tab-users" class="admin-tab pb-3 text-sm font-medium text-slate-400 hover:text-slate-200 border-b-2 border-transparent flex items-center gap-2">
+          <i class="fa-solid fa-users"></i> Users Directory
+        </button>
+      </div>
+
+      <!-- Admin Sub-View 1: Proof Submissions -->
+      <div id="admin-panel-submissions" class="admin-subpanel">
+        <div class="glass-card rounded-2xl p-5 border-slate-800 overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="pb-3">Submission ID</th>
+                <th class="pb-3">Earner Details</th>
+                <th class="pb-3">Task Details</th>
+                <th class="pb-3">Payout</th>
+                <th class="pb-3">AI OCR Audit Result</th>
+                <th class="pb-3">Proof Screenshot</th>
+                <th class="pb-3">Status</th>
+                <th class="pb-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="admin-submissions-tbody" class="divide-y divide-slate-800/60">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Admin Sub-View 2: Withdrawal Requests -->
+      <div id="admin-panel-withdrawals" class="admin-subpanel hidden">
+        <div class="glass-card rounded-2xl p-5 border-slate-800 overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="pb-3">Req ID</th>
+                <th class="pb-3">Earner</th>
+                <th class="pb-3">INR Amount</th>
+                <th class="pb-3">Payout Details</th>
+                <th class="pb-3">Requested / References</th>
+                <th class="pb-3">Status</th>
+                <th class="pb-3 text-right">Disburse Action</th>
+              </tr>
+            </thead>
+            <tbody id="admin-withdrawals-tbody" class="divide-y divide-slate-800/60">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Admin Sub-View 3: Task Campaigns -->
+      <div id="admin-panel-tasks" class="admin-subpanel hidden">
+        <div class="glass-card rounded-2xl p-5 border-slate-800 overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="pb-3">Task ID</th>
+                <th class="pb-3">Campaign Title</th>
+                <th class="pb-3">Category</th>
+                <th class="pb-3">Payout</th>
+                <th class="pb-3">Target Numbers</th>
+                <th class="pb-3">Slots (Done/Total)</th>
+                <th class="pb-3">Status</th>
+                <th class="pb-3 text-right">Toggle</th>
+              </tr>
+            </thead>
+            <tbody id="admin-tasks-tbody" class="divide-y divide-slate-800/60">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Admin Sub-View 4: Users Directory -->
+      <div id="admin-panel-users" class="admin-subpanel hidden">
+        <div class="glass-card rounded-2xl p-5 border-slate-800 overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="pb-3">User ID</th>
+                <th class="pb-3">Name & Contact</th>
+                <th class="pb-3">Role</th>
+                <th class="pb-3">Wallet Balance</th>
+                <th class="pb-3">Lifetime Earned</th>
+                <th class="pb-3">Tasks Approved</th>
+                <th class="pb-3">Referrals</th>
+                <th class="pb-3">Joined</th>
+              </tr>
+            </thead>
+            <tbody id="admin-users-tbody" class="divide-y divide-slate-800/60">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 6: REFER & EARN                           -->
+    <!-- ============================================== -->
+    <section id="view-refer" class="hidden py-8 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="glass-card rounded-3xl p-6 sm:p-8 border-emerald-500/30 mb-8 text-center relative overflow-hidden">
+        <div class="w-16 h-16 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-3xl mx-auto mb-4 font-heading">
+          <i class="fa-solid fa-gift"></i>
+        </div>
+        <h1 class="text-3xl font-bold font-heading text-white">TaskPe Partner Program: Refer & Earn</h1>
+        <p class="text-sm text-slate-300 max-w-lg mx-auto mt-2">
+          <span class="text-emerald-400 font-bold">Earn 10% Lifetime Referral Commission</span><br>Earn 10% lifetime - Your friend earns ₹75, you get ₹7.5 instantly!
+        </p>
+
+        <!-- Referral Link Box -->
+        <div class="mt-8 max-w-md mx-auto bg-slate-950 p-4 rounded-2xl border border-slate-800">
+          <div class="text-xs text-slate-400 mb-1">Your Unique Referral Code</div>
+          <div id="referral-code-display" class="text-2xl font-mono font-black text-emerald-400 tracking-wider mb-4">
+            TASK100
+          </div>
+          <div class="flex gap-2">
+            <button onclick="copyReferralLink()" class="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs border border-slate-700 transition flex items-center justify-center gap-1.5">
+              <i class="fa-regular fa-copy"></i> <span id="copy-ref-label">Copy Link</span>
+            </button>
+            <button onclick="shareReferralWhatsApp()" class="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 glow-wa-sm">
+              <i class="fa-brands fa-whatsapp text-sm"></i> Share WhatsApp
+            </button>
+          </div>
+        </div>
+
+        <!-- Referral Stats Strip -->
+        <div class="grid grid-cols-2 gap-4 max-w-md mx-auto mt-6">
+          <div class="bg-slate-900/80 p-4 rounded-xl">
+            <div class="text-xs text-slate-400">Total Friends Joined</div>
+            <div id="referral-count-stat" class="text-2xl font-bold text-white font-heading mt-1">0</div>
+          </div>
+          <div class="bg-slate-900/80 p-4 rounded-xl">
+            <div class="text-xs text-slate-400">Total Referral Earnings</div>
+            <div class="text-2xl font-bold text-emerald-400 font-heading mt-1">₹<span id="referral-earnings-stat">0.00</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Invited Friends List -->
+      <div class="glass-card rounded-2xl p-5 border-slate-800">
+        <h3 class="text-base font-bold text-white mb-4 flex items-center gap-2">
+          <i class="fa-solid fa-user-group text-emerald-400"></i> Friends Invited By You
+        </h3>
+        <div id="invited-friends-container">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- VIEW 7: LEADERBOARD                            -->
+    <!-- ============================================== -->
+    <section id="view-leaderboard" class="hidden py-8 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-8">
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-semibold mb-3">
+          <i class="fa-solid fa-trophy"></i> Weekly Top Earners
+        </div>
+        <h1 class="text-3xl font-bold font-heading text-white">TaskPe Hall of Fame</h1>
+        <p class="text-sm text-slate-400 mt-1">Top earners of the week. Do more tasks to climb the ranks!</p>
+      </div>
+
+      <div class="glass-card rounded-2xl p-5 border-slate-800 overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead class="text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="pb-3 text-center w-16">Rank</th>
+              <th class="pb-3">Earner Name</th>
+              <th class="pb-3">Mobile</th>
+              <th class="pb-3 text-center">Tasks Completed</th>
+              <th class="pb-3 text-right">Total Earnings</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-tbody" class="divide-y divide-slate-800/60">
+            <!-- Populated by JS -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MOBILE PRIMARY NAVIGATION -->
+  <nav id="mobile-bottom-nav" class="md:hidden fixed inset-x-0 bottom-0 z-40 bg-slate-950/95 border-t border-slate-800 backdrop-blur-lg pb-[env(safe-area-inset-bottom)]" aria-label="Primary navigation">
+    <div class="grid grid-cols-5 max-w-lg mx-auto">
+      <button onclick="navigate('home')" id="mobile-nav-home" class="mobile-nav-btn" aria-label="Home"><i class="fa-solid fa-house"></i><span>Home</span></button>
+      <button onclick="navigate('tasks')" id="mobile-nav-tasks" class="mobile-nav-btn" aria-label="Tasks"><i class="fa-solid fa-list-check"></i><span>Tasks</span></button>
+      <button onclick="navigate('wallet')" id="mobile-nav-wallet" class="mobile-nav-btn" aria-label="Wallet"><i class="fa-solid fa-wallet"></i><span>Wallet</span></button>
+      <button onclick="navigate('refer')" id="mobile-nav-refer" class="mobile-nav-btn" aria-label="Refer"><i class="fa-solid fa-users"></i><span>Refer</span></button>
+      <button onclick="openMobileProfile()" id="mobile-nav-profile" class="mobile-nav-btn" aria-label="Profile"><i class="fa-solid fa-user"></i><span>Profile</span></button>
+    </div>
+  </nav>
+
+  <!-- ============================================== -->
+  <!-- MODAL: AUTH (LOGIN / SIGNUP / OTP)             -->
+  <!-- ============================================== -->
+  <div id="modal-auth" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop">
+    <div class="glass-card bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 sm:p-8 shadow-2xl relative">
+      <button onclick="closeAuthModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white transition">
+        <i class="fa-solid fa-xmark text-lg"></i>
+      </button>
+
+      <!-- Auth Tabs -->
+      <div class="flex border-b border-slate-800 mb-6">
+        <button onclick="switchAuthTab('login')" id="auth-tab-login" class="flex-1 pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 text-center">
+          Log In
+        </button>
+        <button onclick="switchAuthTab('signup')" id="auth-tab-signup" class="flex-1 pb-3 text-sm font-semibold text-slate-400 hover:text-slate-200 border-b-2 border-transparent text-center">
+          Sign Up (+₹20 Free)
+        </button>
+      </div>
+
+
+      <!-- LOGIN FORM -->
+      <form id="form-login" onsubmit="handleLoginSubmit(event)" class="space-y-4">
+        <div>
+          <label for="login-identifier" class="block text-xs font-medium text-slate-300 mb-1">Mobile Number or Email</label>
+          <input type="text" id="login-identifier" inputmode="email" autocomplete="username" placeholder="9876512345 or earner@taskpe.com" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <div>
+          <label for="login-password" class="block text-xs font-medium text-slate-300 mb-1">Password</label>
+          <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
+          Log In to TaskPe
+        </button>
+      </form>
+
+      <!-- SIGNUP FORM -->
+      <form id="form-signup" onsubmit="handleSignupSubmit(event)" class="space-y-3.5 hidden">
+        <div>
+          <label for="signup-name" class="block text-xs font-medium text-slate-300 mb-1">Full Name</label>
+          <input type="text" id="signup-name" placeholder="Rohan Sharma" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <div>
+          <label for="signup-mobile" class="block text-xs font-medium text-slate-300 mb-1">10-Digit Mobile Number (+91)</label>
+          <div class="flex gap-2">
+            <input type="tel" id="signup-mobile" inputmode="numeric" autocomplete="tel-national" placeholder="9876543210" required maxlength="10" class="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+            <button type="button" onclick="sendMobileOtp()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-emerald-600 text-xs font-semibold text-slate-200 hover:text-white transition shrink-0">
+              Send OTP
+            </button>
+          </div>
+        </div>
+        <!-- OTP Input Field -->
+        <div id="signup-otp-container" class="hidden">
+          <label for="signup-otp" class="block text-xs font-medium text-amber-400 mb-1 flex items-center justify-between">
+            <span>Enter 6-Digit OTP</span>
+          </label>
+          <input type="text" id="signup-otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter OTP" maxlength="6" class="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-4 py-2 text-sm font-mono text-white focus:outline-none focus:border-amber-400">
+        </div>
+        <div>
+          <label for="signup-email" class="block text-xs font-medium text-slate-300 mb-1">Email Address</label>
+          <input type="email" id="signup-email" placeholder="user@gmail.com" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <div>
+          <label for="signup-password" class="block text-xs font-medium text-slate-300 mb-1">Create Password</label>
+          <input type="password" id="signup-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <div>
+          <label for="signup-referral" class="block text-xs font-medium text-slate-300 mb-1">Referral Code (Optional)</label>
+          <input type="text" id="signup-referral" placeholder="Ex: ROHAN100" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
+          Create Account & Claim ₹20
+        </button>
+      </form>
+
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL: WITHDRAWAL REQUEST                      -->
+  <!-- ============================================== -->
+  <div id="modal-withdraw" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop">
+    <div class="glass-card bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 sm:p-8 shadow-2xl relative">
+      <button onclick="closeWithdrawModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white transition">
+        <i class="fa-solid fa-xmark text-lg"></i>
+      </button>
+
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-lg">
+          <i class="fa-solid fa-paper-plane"></i>
+        </div>
+        <div>
+          <h3 class="text-lg font-bold text-white font-heading">Withdraw Earnings</h3>
+          <p class="text-xs text-slate-400">Available Balance: <b class="text-emerald-400">₹<span id="modal-withdraw-avail">0.00</span></b></p>
+        </div>
+      </div>
+
+      <form onsubmit="handleWithdrawSubmit(event)" class="space-y-4">
+        <!-- Quick Amount Chips -->
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-2">Select Amount</label>
+          <div class="grid grid-cols-4 gap-2 mb-2">
+            <button type="button" onclick="setWithdrawAmount(minimumWithdrawal)" id="withdraw-quick-min" class="amt-chip py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 transition">₹—</button>
+            <button type="button" onclick="setWithdrawAmount(minimumWithdrawal * 2)" id="withdraw-quick-double" class="amt-chip py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 transition">₹—</button>
+            <button type="button" onclick="setWithdrawAmount(minimumWithdrawal * 4)" id="withdraw-quick-four" class="amt-chip py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 transition">₹—</button>
+            <button type="button" onclick="setWithdrawMax()" class="amt-chip py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-emerald-400 border border-slate-700 transition">Max</button>
+          </div>
+          <div class="relative">
+            <span class="absolute left-3 top-2.5 text-slate-400 text-sm">₹</span>
+            <input type="number" id="withdraw-amount" oninput="updateUsdtEstimate()" inputmode="decimal" min="0.01" step="0.01" required placeholder="50" class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <p id="withdraw-minimum-label" class="text-[10px] text-slate-400 mt-1">Minimum withdrawal: ₹—</p>
+        </div>
+
+        <!-- Payout Method Selector -->
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-2">Payout Method</label>
+          <div class="grid grid-cols-3 gap-3">
+            <label class="cursor-pointer flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-emerald-500/50">
+              <input type="radio" name="withdraw-method" value="upi" checked onchange="togglePayoutMethod('upi')" class="accent-emerald-500">
+              <span class="text-xs font-semibold text-white">Instant UPI ID</span>
+            </label>
+            <label class="cursor-pointer flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800">
+              <input type="radio" name="withdraw-method" value="bank" onchange="togglePayoutMethod('bank')" class="accent-emerald-500">
+              <span class="text-xs font-semibold text-white">Bank Transfer</span>
+            </label>
+            <label class="cursor-pointer flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800">
+              <input type="radio" name="withdraw-method" value="usdt" onchange="togglePayoutMethod('usdt')" class="accent-emerald-500"><span class="text-xs font-semibold text-white">USDT</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- UPI Fields -->
+        <div id="payout-upi-container">
+          <label for="withdraw-upi" class="block text-xs font-medium text-slate-300 mb-1">Enter UPI ID (VPA)</label>
+          <input type="text" id="withdraw-upi" placeholder="yourname@oksbi or 9876543210@paytm" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+          <p class="text-[10px] text-slate-400 mt-1">Google Pay, PhonePe, Paytm, and BHIM supported</p>
+        </div>
+
+        <!-- Bank Fields -->
+        <div id="payout-bank-container" class="space-y-3 hidden">
+          <div>
+            <label for="withdraw-acc" class="block text-xs font-medium text-slate-300 mb-1">Account Number</label>
+            <input type="text" id="withdraw-acc" placeholder="Bank Account Number" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label for="withdraw-ifsc" class="block text-xs font-medium text-slate-300 mb-1">IFSC Code</label>
+            <input type="text" id="withdraw-ifsc" placeholder="SBIN0001234" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label for="withdraw-holder" class="block text-xs font-medium text-slate-300 mb-1">Account Holder Name</label>
+            <input type="text" id="withdraw-holder" placeholder="Name as per bank account" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+        <div id="payout-usdt-container" class="space-y-3 hidden">
+          <div class="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 text-[11px] text-amber-200">Send USDT only to the selected network. Sending to the wrong network may permanently lose funds.</div>
+          <div><label class="block text-xs font-medium text-slate-300 mb-1">Network</label><input id="withdraw-usdt-network" readonly value="TRC20" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-300"></div>
+          <div><label class="block text-xs font-medium text-slate-300 mb-1">USDT Wallet Address</label><input id="withdraw-usdt-address" placeholder="Enter your selected-network wallet address" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white"></div>
+          <p id="withdraw-usdt-estimate" class="text-xs text-emerald-400">Estimated USDT: —</p>
+        </div>
+
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
+          Confirm Withdrawal Request
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL: ADMIN CREATE TASK                       -->
+  <!-- ============================================== -->
+  <div id="modal-create-task" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop">
+    <div class="glass-card bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 sm:p-8 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+      <button onclick="closeCreateTaskModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white transition">
+        <i class="fa-solid fa-xmark text-lg"></i>
+      </button>
+
+      <h3 class="text-xl font-bold text-white font-heading mb-1">Create New WhatsApp Campaign</h3>
+      <p class="text-xs text-slate-400 mb-6">Distribute promotional messages or links to real earners.</p>
+
+      <form onsubmit="handleCreateTaskSubmit(event)" class="space-y-4">
+        <div>
+          <label for="newtask-title" class="block text-xs font-medium text-slate-300 mb-1">Task Title</label>
+          <input type="text" id="newtask-title" required placeholder="Ex: Forward New App Launch Promo to 10 Numbers" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label for="newtask-category" class="block text-xs font-medium text-slate-300 mb-1">Category</label>
+            <select id="newtask-category" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+              <option value="Direct Message">Direct Message</option>
+              <option value="Broadcast">Broadcast</option>
+              <option value="App Invite">App Invite</option>
+              <option value="Status Share">Status Share</option>
+            </select>
+          </div>
+          <div>
+            <label for="newtask-payout" class="block text-xs font-medium text-slate-300 mb-1">Payout per earner (server-calculated)</label>
+            <input type="number" id="newtask-payout" readonly value="0" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-400">
+          </div>
+        </div>
+
+        <div>
+          <label for="newtask-desc" class="block text-xs font-medium text-slate-300 mb-1">Description & Instructions</label>
+          <textarea id="newtask-desc" rows="2" required placeholder="Explain what the earner needs to do..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <div>
+          <label for="newtask-template" class="block text-xs font-medium text-slate-300 mb-1">WhatsApp Message Template (Exact text earner sends)</label>
+          <textarea id="newtask-template" rows="3" required placeholder="🔥 Big Festive Offer! Check out our new deals here: https://bit.ly/deal. Use code: SAVE50" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm font-mono text-white focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <div>
+          <label for="newtask-numbers" class="block text-xs font-medium text-slate-300 mb-1">Target Phone Numbers (Comma or newline separated)</label>
+          <textarea id="newtask-numbers" rows="3" required placeholder="919811122233, 919822233344, 919833344455" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm font-mono text-white focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label for="newtask-slots" class="block text-xs font-medium text-slate-300 mb-1">Total Earner Slots</label>
+            <input type="number" id="newtask-slots" value="50" min="1" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+          <div>
+            <label for="newtask-recipients-per-slot" class="block text-xs font-medium text-slate-300 mb-1">Recipients Per Earner</label>
+            <input type="number" id="newtask-recipients-per-slot" value="25" min="1" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+            <p class="text-[10px] text-slate-500 mt-1">Upload slots × recipients unique numbers.</p>
+          </div>
+          <div>
+            <label for="newtask-timelimit" class="block text-xs font-medium text-slate-300 mb-1">Time Limit (Mins)</label>
+            <input type="number" id="newtask-timelimit" value="15" min="5" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+          </div>
+        </div>
+
+        <div>
+          <label for="newtask-proof" class="block text-xs font-medium text-slate-300 mb-1">Proof Requirement Instructions</label>
+          <input type="text" id="newtask-proof" value="Upload screenshot showing delivered messages with double ticks." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
+          Publish WhatsApp Task
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL: LIGHTBOX SCREENSHOT PREVIEW             -->
+  <!-- ============================================== -->
+  <div id="modal-lightbox" class="hidden fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-3 sm:p-4 modal-backdrop" onclick="if (event.target === this) closeLightbox()">
+    <div class="glass-card bg-slate-900 border border-slate-800 max-w-2xl w-full max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-2rem)] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+      <div class="shrink-0 px-5 sm:px-6 pt-5 sm:pt-6 pb-3 border-b border-slate-800/80 flex items-start justify-between gap-4">
+        <div>
+          <h4 class="text-base font-bold text-white mb-1">Proof Screenshot Verification</h4>
+          <p id="lightbox-caption" class="text-xs text-slate-400">Submission by User</p>
+        </div>
+        <button onclick="closeLightbox()" type="button" aria-label="Close verification popup" class="shrink-0 w-9 h-9 -mt-1 -mr-1 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white transition flex items-center justify-center">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 sm:px-6 py-4">
+        <div class="bg-slate-950 rounded-2xl p-2 border border-slate-800 flex items-center justify-center max-h-[42vh] overflow-hidden">
+          <img id="lightbox-img" src="" alt="Proof Screenshot" class="max-h-[38vh] object-contain rounded-lg">
+        </div>
+        <div id="lightbox-gallery" class="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label="Proof screenshot gallery"></div>
+
+        <!-- AI OCR Audit Detail Box -->
+        <div id="lightbox-audit-card" class="mt-3 p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-xs">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1.5">
+            <span class="font-bold text-emerald-400 flex items-center gap-1.5">
+              <i class="fa-solid fa-robot"></i> AI OCR Audit Breakdown
+            </span>
+            <span id="lightbox-audit-badge" class="w-fit px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Auto-Verified</span>
+          </div>
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-slate-300 mt-1">
+            <div id="lightbox-numbers-count" class="font-semibold text-white">Numbers Detected: 25/25 (100%)</div>
+            <div id="lightbox-template-match" class="font-mono text-emerald-400">Template Match: 95%</div>
+          </div>
+          <p class="text-[11px] text-slate-400 mt-1" id="lightbox-audit-summary">The AI OCR engine automatically parsed this screenshot, confirmed delivery double ticks, and matched all campaign recipients.</p>
+        </div>
+      </div>
+
+      <div id="lightbox-actions" class="shrink-0 border-t border-slate-800 bg-slate-900/95 backdrop-blur px-5 sm:px-6 py-3 sm:py-4 flex flex-wrap gap-2 sm:gap-3">
+        <button onclick="closeLightbox()" type="button" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition border border-slate-700">Close</button>
+        <div id="lightbox-primary-actions" class="flex-1 min-w-[14rem] flex flex-wrap gap-2 sm:gap-3">
+          <!-- Injected approve/reject buttons for admin -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATIONS CONTAINER -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+  <!-- FOOTER -->
+  <footer class="mt-auto border-t border-slate-800/80 bg-slate-950 py-8 text-xs text-slate-400">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-2">
+        <div class="w-6 h-6 rounded-lg bg-emerald-600 flex items-center justify-center text-white text-xs">
+          <i class="fa-brands fa-whatsapp"></i>
+        </div>
+        <span class="font-bold text-white font-heading">TaskPe</span>
+        <span class="text-slate-400">— WhatsApp Task Earning Platform</span>
+      </div>
+      <div class="flex items-center space-x-4 text-slate-400">
+        <span>Instant UPI Payouts</span>
+        <span>•</span>
+        <span>Zero Joining Fee</span>
+        <span>•</span>
+        <span>Verified Business Campaigns</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    window.__TASKPE_CSRF__ = {{ csrf_token()|tojson }};
+    (() => { const nativeFetch = window.fetch.bind(window); window.fetch = (input, init = {}) => { const method = (init.method || 'GET').toUpperCase(); if (['POST','PUT','PATCH','DELETE'].includes(method)) { const headers = new Headers(init.headers || {}); headers.set('X-CSRF-Token', window.__TASKPE_CSRF__); init = {...init, headers}; } return nativeFetch(input, init); }; })();
+  </script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
