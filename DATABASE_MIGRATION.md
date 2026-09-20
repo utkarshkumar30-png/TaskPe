@@ -27,6 +27,21 @@ If `TASKPE_DB_PATH` is empty, use the project-local `taskpe.db` explicitly.
 
 ## Stage and migrate
 
+The web application does not apply migrations during production startup. A
+production import verifies the required schema and fails closed if it is
+incomplete. Perform initialization or each migration explicitly, against a
+backed-up and deliberate database path, before starting Waitress.
+
+For a fresh database only:
+
+```powershell
+.venv\Scripts\python.exe initialize_database.py --db <fresh-database>
+```
+
+This command may create the base schema and perform the existing compatibility
+initialization. It must not be pointed at the only production copy without a
+backup and an approved maintenance window.
+
 Copy the backed-up database to a staging filename. Never point this command at
 the production path:
 

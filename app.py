@@ -13,6 +13,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import smtplib
+from email.message import EmailMessage
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from functools import wraps
@@ -20,6 +22,7 @@ from flask import Flask, request, jsonify, render_template, session, send_from_d
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
+from itsdangerous import BadSignature, URLSafeSerializer
 from money import (
     bps_of_paise,
     decimal_value,
@@ -38,8 +41,24 @@ ENVIRONMENT = os.environ.get('ENVIRONMENT', 'production').strip().lower()
 # environments follow the production-safe path.
 IS_DEVELOPMENT = ENVIRONMENT == 'development'
 IS_PRODUCTION = not IS_DEVELOPMENT
+_configured_db_path = os.environ.get('TASKPE_DB_PATH', '').strip()
+if IS_PRODUCTION and not _configured_db_path:
+    raise RuntimeError('TASKPE_DB_PATH must be set to a persistent database path when ENVIRONMENT=production.')
+if _configured_db_path and not os.path.isabs(_configured_db_path):
+    raise RuntimeError('TASKPE_DB_PATH must be an absolute path.')
 SMS_PROVIDER = os.environ.get('SMS_PROVIDER', 'disabled').strip().lower()
 FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '').strip()
+_fast2sms_enabled_raw = os.environ.get('FAST2SMS_ENABLED')
+FAST2SMS_ENABLED = (
+    _fast2sms_enabled_raw.strip().lower() in {'1', 'true', 'yes'}
+    if _fast2sms_enabled_raw is not None
+    else SMS_PROVIDER == 'fast2sms'
+)
+FAST2SMS_ROUTE = os.environ.get('FAST2SMS_ROUTE', 'q').strip().lower() or 'q'
+FAST2SMS_SUCCESS = 'SUCCESS'
+FAST2SMS_PROVIDER_REJECTED = 'PROVIDER_REJECTED'
+FAST2SMS_PROVIDER_ERROR = 'PROVIDER_ERROR'
+FAST2SMS_NETWORK_ERROR = 'NETWORK_ERROR'
 PAYOUT_MODE = os.environ.get('PAYOUT_MODE', 'MANUAL').strip().upper()
 if PAYOUT_MODE != 'MANUAL':
     raise RuntimeError('Unsupported PAYOUT_MODE. Only MANUAL payout mode is allowed.')
@@ -47,6 +66,17 @@ OTP_RESEND_COOLDOWN_SECONDS = 60
 OTP_EXPIRY_MINUTES = 10
 OTP_MAX_VERIFICATION_ATTEMPTS = 5
 OTP_MAX_REQUESTS_PER_HOUR = 5
+RESET_TOKEN_EXPIRY_MINUTES = 10
+EMAIL_VERIFICATION_EXPIRY_MINUTES = 30
+DEVICE_COOKIE_NAME = 'taskpe_device'
+EMAIL_DEVICE_ACCOUNT_LIMIT = 2
+MOBILE_DEVICE_ACCOUNT_LIMIT = 4
+EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', 'disabled').strip().lower()
+EMAIL_SMTP_HOST = os.environ.get('EMAIL_SMTP_HOST', '').strip()
+EMAIL_SMTP_PORT_RAW = os.environ.get('EMAIL_SMTP_PORT', '587').strip()
+EMAIL_SMTP_USERNAME = os.environ.get('EMAIL_SMTP_USERNAME', '').strip()
+EMAIL_SMTP_PASSWORD = os.environ.get('EMAIL_SMTP_PASSWORD', '')
+EMAIL_FROM = os.environ.get('EMAIL_FROM', '').strip()
 SECRET_KEY = os.environ.get('SECRET_KEY', '').strip()
 if IS_PRODUCTION and not SECRET_KEY:
     raise RuntimeError('SECRET_KEY must be set when ENVIRONMENT=production.')
@@ -54,8 +84,29 @@ if IS_DEVELOPMENT and not SECRET_KEY:
     SECRET_KEY = 'taskpe-development-only-secret'
 if SMS_PROVIDER not in {'disabled', 'fast2sms'}:
     raise RuntimeError('Unsupported SMS_PROVIDER. Use fast2sms or disabled.')
+if IS_PRODUCTION and SMS_PROVIDER == 'fast2sms' and not FAST2SMS_ENABLED:
+    raise RuntimeError('FAST2SMS_ENABLED must be 1 when SMS_PROVIDER=fast2sms in production.')
 if IS_PRODUCTION and SMS_PROVIDER == 'fast2sms' and not FAST2SMS_API_KEY:
     raise RuntimeError('FAST2SMS_API_KEY is required when SMS_PROVIDER=fast2sms in production.')
+if EMAIL_PROVIDER not in {'disabled', 'smtp'}:
+    raise RuntimeError('Unsupported EMAIL_PROVIDER. Use smtp or disabled.')
+try:
+    EMAIL_SMTP_PORT = int(EMAIL_SMTP_PORT_RAW)
+except ValueError:
+    raise RuntimeError('EMAIL_SMTP_PORT must be a valid port number.')
+if not 1 <= EMAIL_SMTP_PORT <= 65535:
+    raise RuntimeError('EMAIL_SMTP_PORT must be between 1 and 65535.')
+if IS_PRODUCTION and EMAIL_PROVIDER == 'smtp':
+    missing_email_config = [
+        name for name, value in {
+            'EMAIL_SMTP_HOST': EMAIL_SMTP_HOST,
+            'EMAIL_SMTP_USERNAME': EMAIL_SMTP_USERNAME,
+            'EMAIL_SMTP_PASSWORD': EMAIL_SMTP_PASSWORD,
+            'EMAIL_FROM': EMAIL_FROM,
+        }.items() if not value
+    ]
+    if missing_email_config:
+        raise RuntimeError('SMTP email provider configuration is incomplete.')
 try:
     TRUSTED_PROXY_HOPS = int(os.environ.get('TRUSTED_PROXY_HOPS', '0'))
 except ValueError:
@@ -72,6 +123,12 @@ RATE_LIMIT_RULES = {
     '/api/auth/register': (10, 600),
     '/api/auth/send-otp': (5, 3600),
     '/api/auth/verify-otp': (15, 600),
+    '/api/auth/forgot-password': (5, 3600),
+    '/api/auth/forgot-password/verify': (15, 600),
+    '/api/auth/reset-password': (10, 600),
+    '/api/auth/send-email-verification': (5, 3600),
+    '/api/auth/verify-email': (15, 600),
+    '/api/auth/register-email': (10, 600),
     '/api/wallet/withdraw': (5, 600),
 }
 
@@ -93,6 +150,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='Lax',
     DEBUG=IS_DEVELOPMENT and os.environ.get('FLASK_DEBUG', '').strip() == '1'
 )
+DEVICE_SIGNER = URLSafeSerializer(SECRET_KEY, salt='taskpe-device-v1')
 
 @app.after_request
 def add_security_headers(response):
@@ -165,16 +223,69 @@ def enforce_request_controls():
             if not expected or not supplied or not hmac.compare_digest(expected, supplied):
                 return jsonify({'success': False, 'message': 'Invalid CSRF token.'}), 403
 
+@app.before_request
+def prepare_device_identity():
+    """Load or create a signed, opaque first-party device identifier."""
+    signed = request.cookies.get(DEVICE_COOKIE_NAME)
+    try:
+        device_id = DEVICE_SIGNER.loads(signed) if signed else None
+        if not isinstance(device_id, str) or len(device_id) < 32:
+            raise BadSignature('invalid device id')
+        request.environ['taskpe_device_id'] = device_id
+        request.environ['taskpe_device_cookie'] = None
+    except BadSignature:
+        device_id = secrets.token_urlsafe(32)
+        request.environ['taskpe_device_id'] = device_id
+        request.environ['taskpe_device_cookie'] = DEVICE_SIGNER.dumps(device_id)
+
+@app.after_request
+def set_device_cookie(response):
+    signed = request.environ.get('taskpe_device_cookie')
+    if signed:
+        response.set_cookie(
+            DEVICE_COOKIE_NAME,
+            signed,
+            max_age=60 * 60 * 24 * 365,
+            httponly=True,
+            secure=IS_PRODUCTION,
+            samesite='Lax',
+        )
+    return response
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.environ.get('TASKPE_UPLOAD_FOLDER', '').strip() or os.path.join(BASE_DIR, 'uploads', 'proofs')
+def configured_storage_path(name, development_default):
+    value = os.environ.get(name, '').strip()
+    if IS_PRODUCTION and not value:
+        raise RuntimeError(f'{name} must be set to a persistent path when ENVIRONMENT=production.')
+    if value and not os.path.isabs(value):
+        raise RuntimeError(f'{name} must be an absolute path.')
+    return value or development_default
+
+UPLOAD_FOLDER = configured_storage_path(
+    'TASKPE_UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads', 'proofs')
+)
+TASK_ASSET_FOLDER = configured_storage_path(
+    'TASKPE_TASK_ASSET_FOLDER', os.path.join(BASE_DIR, 'uploads', 'task-assets')
+)
+
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['TASK_ASSET_FOLDER'] = TASK_ASSET_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+try:
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(TASK_ASSET_FOLDER, exist_ok=True)
+except OSError as exc:
+    raise RuntimeError('Configured upload paths are missing or unavailable.') from exc
 
-# Initialize database on startup
-database.init_db()
+# Development keeps the existing explicit initializer and seed behavior. A
+# production WSGI import must only verify that the deployment was migrated.
+if IS_DEVELOPMENT:
+    database.initialize_database()
+else:
+    database.verify_required_schema()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -213,16 +324,115 @@ def normalize_auth_mobile(value):
         digits = digits[-10:]
     return digits
 
+def current_device_id_hash():
+    device_id = request.environ.get('taskpe_device_id')
+    if not device_id:
+        raise RuntimeError('Device identity was not prepared.')
+    return hashlib.sha256(device_id.encode('utf-8')).hexdigest()
+
+def device_account_limit_reached(conn, signup_method):
+    limit = EMAIL_DEVICE_ACCOUNT_LIMIT if signup_method == 'EMAIL' else MOBILE_DEVICE_ACCOUNT_LIMIT
+    row = conn.execute('''
+        SELECT COUNT(*) AS count FROM device_registrations
+        WHERE device_id_hash = ? AND signup_method = ?
+    ''', (current_device_id_hash(), signup_method)).fetchone()
+    return int(row['count']) >= limit
+
+def device_limit_message(signup_method):
+    if signup_method == 'EMAIL':
+        return 'This device has reached the maximum number of email accounts allowed.'
+    return 'This device has reached the maximum number of mobile accounts allowed.'
+
+def email_token_digest(email, token):
+    return hmac.new(SECRET_KEY.encode('utf-8'), f'{email}:{token}'.encode('utf-8'), hashlib.sha256).hexdigest()
+
+class EmailProvider:
+    def send_verification(self, recipient, token):
+        raise NotImplementedError
+
+
+class DisabledEmailProvider(EmailProvider):
+    def send_verification(self, recipient, token):
+        return IS_DEVELOPMENT
+
+
+class SmtpEmailProvider(EmailProvider):
+    def send_verification(self, recipient, token):
+        message = EmailMessage()
+        message['Subject'] = 'TaskPe email verification'
+        message['From'] = EMAIL_FROM
+        message['To'] = recipient
+        message.set_content(
+            f'Your TaskPe email verification token is: {token}\n'
+            f'This token expires in {EMAIL_VERIFICATION_EXPIRY_MINUTES} minutes.'
+        )
+        try:
+            with smtplib.SMTP(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
+                server.send_message(message)
+            return True
+        except (OSError, smtplib.SMTPException):
+            logger.warning('SMTP email verification delivery failed.')
+            return False
+
+
+email_provider = SmtpEmailProvider() if EMAIL_PROVIDER == 'smtp' else DisabledEmailProvider()
+
+
+def send_email_verification(email, token):
+    """Send through the configured provider without logging email secrets."""
+    return email_provider.send_verification(email, token)
+
+def _sanitize_fast2sms_text(value):
+    """Keep provider diagnostics useful without logging credentials or secrets."""
+    if isinstance(value, (list, tuple)):
+        value = '; '.join(str(item) for item in value)
+    text = str(value or '')
+    if FAST2SMS_API_KEY:
+        text = text.replace(FAST2SMS_API_KEY, '[REDACTED]')
+    text = re.sub(
+        r'(?i)(authorization|api[_ -]?key|access[_ -]?token|token|secret|password)'
+        r'\s*([:=])\s*("[^"]*"|\'[^\']*\'|[^,\s}]+)',
+        r'\1\2[REDACTED]',
+        text,
+    )
+    text = re.sub(r'\b\d{10,12}\b', '[REDACTED_MOBILE]', text)
+    text = re.sub(r'\b\d{6}\b', '[REDACTED_OTP]', text)
+    return re.sub(r'[\r\n]+', ' ', text)[:240]
+
+
+def _fast2sms_response_details(raw):
+    """Extract only safe provider fields for internal diagnostics."""
+    try:
+        result = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        result = {}
+    if not isinstance(result, dict):
+        return None, '', _sanitize_fast2sms_text(raw), ''
+    request_id = re.sub(r'[^A-Za-z0-9._-]', '', str(result.get('request_id') or ''))[:120]
+    message = _sanitize_fast2sms_text(result.get('message'))
+    error_code = _sanitize_fast2sms_text(result.get('code') or result.get('error_code'))
+    if not error_code:
+        match = re.search(r'\b(?:995|996|997|998|999)\b', f'{message} {_sanitize_fast2sms_text(raw)}')
+        error_code = match.group(0) if match else ''
+    return result.get('return') if isinstance(result.get('return'), bool) else None, request_id, message, error_code
+
+
 def send_fast2sms_otp(mobile, otp):
-    """Deliver a server-generated OTP through Fast2SMS without exposing secrets."""
-    if SMS_PROVIDER == 'disabled':
-        return True
-    if SMS_PROVIDER != 'fast2sms' or not FAST2SMS_API_KEY:
+    """Deliver an OTP through Fast2SMS and return a safe internal result."""
+    if SMS_PROVIDER == 'disabled' or (IS_DEVELOPMENT and not FAST2SMS_ENABLED):
+        return FAST2SMS_SUCCESS
+    if SMS_PROVIDER != 'fast2sms' or not FAST2SMS_ENABLED or not FAST2SMS_API_KEY:
         logger.error('Fast2SMS OTP configuration is incomplete.')
-        return False
+        return FAST2SMS_PROVIDER_ERROR
+    route = FAST2SMS_ROUTE
+    if route != 'q':
+        logger.error('Fast2SMS route configuration is unsupported; only Quick SMS route=q is allowed.')
+        return FAST2SMS_PROVIDER_ERROR
     payload = json.dumps({
-        'variables_values': otp,
-        'route': 'otp',
+        'message': f'TaskPe verification code: {otp}. This code expires in 10 minutes. Do not share this code with anyone.',
+        'route': route,
         'numbers': mobile[-10:],
     }).encode('utf-8')
     request_obj = urllib.request.Request(
@@ -237,65 +447,42 @@ def send_fast2sms_otp(mobile, otp):
     )
     try:
         with urllib.request.urlopen(request_obj, timeout=10) as response:
-            status = getattr(response, 'status', response.getcode())
+            status = int(getattr(response, 'status', response.getcode()))
             raw = response.read().decode('utf-8', errors='replace')
-        if not 200 <= int(status) < 300:
-            logger.warning('Fast2SMS rejected an OTP request.')
-            return False
+        returned, request_id, message, error_code = _fast2sms_response_details(raw)
+        logger.info(
+            'Fast2SMS OTP response: reached=True status=%s return=%s request_id=%s message=%s error_code=%s route=%s',
+            status, returned, request_id or '[none]', message or '[none]', error_code or '[none]', route,
+        )
+        if not 200 <= status < 300:
+            return FAST2SMS_PROVIDER_ERROR
+        return FAST2SMS_SUCCESS if returned is True else FAST2SMS_PROVIDER_REJECTED
+    except urllib.error.HTTPError as exc:
         try:
-            result = json.loads(raw) if raw else {}
-        except ValueError:
-            result = {}
-        if not isinstance(result, dict) or result.get('return') is not True:
-            logger.warning('Fast2SMS rejected an OTP request.')
-            return False
-        return True
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        def redact_diagnostic(value):
-            text = str(value or '')
-            if FAST2SMS_API_KEY:
-                text = text.replace(FAST2SMS_API_KEY, '[REDACTED]')
-            text = re.sub(
-                r'(?i)(authorization|api[_ -]?key|access[_ -]?token|token|secret|password)'
-                r'\s*([:=])\s*("[^"]*"|\'[^\']*\'|[^,\s}]+)',
-                r'\1\2[REDACTED]',
-                text,
-            )
-            text = re.sub(r'\b\d{10,12}\b', '[REDACTED_MOBILE]', text)
-            text = re.sub(r'\b\d{6}\b', '[REDACTED_OTP]', text)
-            return text[:1000]
-
-        if isinstance(exc, urllib.error.HTTPError):
-            try:
-                response_body = exc.read().decode('utf-8', errors='replace')
-            except (OSError, ValueError):
-                response_body = '[UNAVAILABLE]'
-            logger.warning(
-                'Fast2SMS HTTP error: status=%s body=%s',
-                exc.code,
-                redact_diagnostic(response_body),
-            )
-        elif isinstance(exc, urllib.error.URLError):
-            reason = exc.reason
-            logger.warning(
-                'Fast2SMS URL error: type=%s code=%s reason=%s',
-                type(reason).__name__,
-                getattr(reason, 'errno', None),
-                redact_diagnostic(reason),
-            )
-        else:
-            logger.warning(
-                'Fast2SMS request exception: type=%s message=%s',
-                type(exc).__name__,
-                redact_diagnostic(exc),
-            )
-        return False
+            response_body = exc.read().decode('utf-8', errors='replace')
+        except (OSError, ValueError):
+            response_body = ''
+        returned, request_id, message, error_code = _fast2sms_response_details(response_body)
+        logger.warning(
+            'Fast2SMS OTP response: reached=True status=%s return=%s request_id=%s message=%s error_code=%s route=%s',
+            exc.code, returned, request_id or '[none]', message or '[none]', error_code or '[none]', route,
+        )
+        return FAST2SMS_PROVIDER_ERROR
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        logger.warning(
+            'Fast2SMS OTP response: reached=False status=None return=None request_id=[none] message=%s error_code=[none] route=%s',
+            _sanitize_fast2sms_text(exc), route,
+        )
+        return FAST2SMS_NETWORK_ERROR
 
 def otp_digest(mobile, otp):
     """Return a server-only digest for a mobile-bound OTP."""
     secret = SECRET_KEY.encode('utf-8')
     message = f'{mobile}:{otp}'.encode('utf-8')
     return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+def reset_token_digest(token):
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 def task_recipient_pool(task):
     try:
@@ -416,13 +603,18 @@ def valid_usdt_address(network, address):
     return False
 
 def calculate_task_payout(conn, task, recipient_count=None):
-    """Payout is the current admin-set per-message rate times assigned recipients."""
+    """Return the task's immutable per-recipient reward times assigned recipients."""
     count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task)))
     return float(paise_to_inr(calculate_task_payout_paise(conn, task, count)))
 
 def calculate_task_payout_paise(conn, task, recipient_count=None):
     count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task)))
-    rate_paise = inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3'))
+    rate_paise = task.get('reward_per_number_paise') if isinstance(task, dict) else None
+    if rate_paise is None and hasattr(task, 'keys') and 'reward_per_number_paise' in task.keys():
+        rate_paise = task['reward_per_number_paise']
+    if rate_paise is None:
+        rate_paise = inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3'))
+    rate_paise = int(rate_paise)
     return rate_paise * int(count)
 
 def approval_threshold(required_count):
@@ -529,13 +721,12 @@ def get_reusable_target_numbers(conn, campaign_id=None, candidate_numbers=None, 
               AND status IN ('assigned', 'verified')
         ''', (number,)).fetchone():
             continue
-        # A genuinely remaining target was assigned but not completed. It is
-        # immediately reusable, so the normal contacted-number cooldown does
-        # not apply to this remaining record. Fresh pool allocations still use
-        # the existing cooldown checks in take_task().
+        # A genuinely remaining target was assigned but not completed and is
+        # immediately reusable within the campaign.
         if campaign_id is not None and conn.execute('''
             SELECT 1 FROM recipient_allocations
             WHERE campaign_id = ? AND phone_number = ?
+              AND status IN ('ALLOCATED', 'COMPLETED')
         ''', (campaign_id, number)).fetchone():
             continue
         reusable.append(number)
@@ -545,7 +736,24 @@ def get_reusable_target_numbers(conn, campaign_id=None, candidate_numbers=None, 
 
 def release_expired_assignments(conn):
     """Release overdue, unsubmitted assignments using database time as truth."""
+    started_transaction = not conn.in_transaction
+    if started_transaction:
+        conn.execute('BEGIN IMMEDIATE')
     cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE recipient_allocations
+        SET status = 'RELEASED'
+        WHERE status = 'ALLOCATED'
+          AND assignment_id IN (
+              SELECT ta.id FROM task_assignments ta
+              WHERE ta.status = 'in_progress'
+                AND ta.expires_at IS NOT NULL
+                AND ta.expires_at <= CURRENT_TIMESTAMP
+                AND NOT EXISTS (
+                    SELECT 1 FROM submissions s WHERE s.assignment_id = ta.id
+                )
+          )
+    ''')
     cursor.execute('''
         UPDATE task_assignments
         SET status = 'expired', slot_released = 1
@@ -554,7 +762,22 @@ def release_expired_assignments(conn):
           AND expires_at <= CURRENT_TIMESTAMP
           AND slot_released = 0
     ''')
+    if started_transaction:
+        conn.commit()
     return cursor.rowcount
+
+def settle_recipient_allocations_for_approval(conn, assignment_id):
+    """Keep OCR-verified recipients permanently used and release the rest."""
+    conn.execute('''
+        UPDATE recipient_allocations
+        SET status = CASE WHEN EXISTS (
+            SELECT 1 FROM target_number_records tnr
+            WHERE tnr.assignment_id = recipient_allocations.assignment_id
+              AND tnr.normalized_target_number = recipient_allocations.phone_number
+              AND tnr.status IN ('verified', 'paid')
+        ) THEN 'COMPLETED' ELSE 'RELEASED' END
+        WHERE assignment_id = ? AND status = 'ALLOCATED'
+    ''', (assignment_id,))
 
 def credit_referrer_for_task(cursor, worker, payout, submission_id):
     """Backend-only referral cap; no UI signal is emitted once the cap is reached."""
@@ -650,6 +873,33 @@ def uploaded_proof(filename):
         return jsonify({'success': False, 'message': 'Not authorized to view this proof.'}), 403
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+def normalize_task_destination(value):
+    """Allow only ordinary HTTP(S) links for worker-facing campaign tasks."""
+    raw = str(value or '').strip()
+    if not raw or any(ord(char) < 32 or char.isspace() for char in raw):
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in {'http', 'https'} or not parsed.netloc:
+        return None
+    if parsed.username or parsed.password or not parsed.hostname:
+        return None
+    return urllib.parse.urlunparse((parsed.scheme.lower(), parsed.netloc, parsed.path or '/', '', parsed.query, parsed.fragment))
+
+@app.route('/uploads/task-assets/<filename>')
+@login_required
+def uploaded_task_asset(filename):
+    if not filename or secure_filename(filename) != filename or not filename.startswith('campaign_'):
+        return jsonify({'success': False, 'message': 'Task image not found.'}), 404
+    user = get_current_user()
+    conn = database.get_db_connection()
+    task = conn.execute(
+        "SELECT id, status FROM tasks WHERE image_path = ?", (filename,)
+    ).fetchone()
+    conn.close()
+    if not task or (user['role'] != 'admin' and task['status'] not in {'active', 'paused'}):
+        return jsonify({'success': False, 'message': 'Task image not found.'}), 404
+    return send_from_directory(app.config['TASK_ASSET_FOLDER'], filename)
+
 # ----------------- AUTH APIS -----------------
 @app.route('/api/auth/csrf', methods=['GET'])
 def auth_csrf():
@@ -706,6 +956,11 @@ def register():
         conn.close()
         return jsonify({'success': False, 'message': 'User with this email or mobile already exists.'}), 400
 
+    if device_account_limit_reached(conn, 'MOBILE'):
+        conn.rollback()
+        conn.close()
+        return jsonify({'success': False, 'message': device_limit_message('MOBILE')}), 429
+
     # Check referrer
     referred_by = None
     if ref_code:
@@ -726,10 +981,14 @@ def register():
 
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO users (name, mobile, email, password_hash, role, wallet_balance, total_earned, referral_code, referred_by)
-        VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?)
+        INSERT INTO users (name, mobile, email, password_hash, role, wallet_balance, total_earned, referral_code, referred_by, signup_method)
+        VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?, 'MOBILE')
     ''', (name, mobile, email, pw_hash, initial_bonus, initial_bonus, new_code, referred_by))
     new_user_id = cursor.lastrowid
+    cursor.execute('''
+        INSERT INTO device_registrations (device_id_hash, signup_method, user_id)
+        VALUES (?, 'MOBILE', ?)
+    ''', (current_device_id_hash(), new_user_id))
     cursor.execute("UPDATE users SET wallet_balance_paise = ?, total_earned_paise = ? WHERE id = ?", (initial_bonus_paise, initial_bonus_paise, new_user_id))
 
     # Record signup bonus transaction
@@ -769,6 +1028,137 @@ def register():
         }
     })
 
+@app.route('/api/auth/send-email-verification', methods=['POST'])
+def send_email_verification_route():
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    generic = 'If this email can be registered, a verification link has been sent.'
+    if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email) or len(email) > 254:
+        return jsonify({'success': False, 'message': 'Please enter a valid email address.'}), 400
+
+    conn = database.get_db_connection()
+    existing = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+    recent = conn.execute('''
+        SELECT 1 FROM email_verifications
+        WHERE email = ? AND created_at > datetime('now', '-60 seconds')
+        LIMIT 1
+    ''', (email,)).fetchone()
+    if existing or recent:
+        conn.close()
+        return jsonify({'success': True, 'message': generic})
+    conn.execute('BEGIN IMMEDIATE')
+    token = secrets.token_urlsafe(32)
+    conn.execute('DELETE FROM email_verifications WHERE email = ? AND used_at IS NULL', (email,))
+    conn.execute('''
+        INSERT INTO email_verifications (email, token_hash, expires_at)
+        VALUES (?, ?, datetime('now', ?))
+    ''', (email, email_token_digest(email, token), f'+{EMAIL_VERIFICATION_EXPIRY_MINUTES} minutes'))
+    conn.commit()
+    conn.close()
+
+    if not send_email_verification(email, token):
+        return jsonify({'success': False, 'message': 'Unable to send email verification right now.'}), 503
+    response = {'success': True, 'message': generic}
+    if IS_DEVELOPMENT:
+        response['verification_token'] = token
+    return jsonify(response)
+
+@app.route('/api/auth/verify-email', methods=['POST'])
+def verify_email():
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    token = (data.get('verification_token') or '').strip()
+    if not email or not token:
+        return jsonify({'success': False, 'message': 'Invalid or expired email verification.'}), 400
+    conn = database.get_db_connection()
+    row = conn.execute('''
+        SELECT id FROM email_verifications
+        WHERE email = ? AND token_hash = ? AND used_at IS NULL
+          AND expires_at > CURRENT_TIMESTAMP
+    ''', (email, email_token_digest(email, token))).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'success': False, 'message': 'Invalid or expired email verification.'}), 400
+    return jsonify({'success': True, 'message': 'Email verified successfully.'})
+
+@app.route('/api/auth/register-email', methods=['POST'])
+def register_email():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    ref_code = (data.get('referral_code') or '').strip().upper()
+    token = (data.get('verification_token') or '').strip()
+    if not name or not email or not password or not token:
+        return jsonify({'success': False, 'message': 'All fields are required.'}), 400
+    if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email) or len(email) > 254:
+        return jsonify({'success': False, 'message': 'Please enter a valid email address.'}), 400
+    if len(password) < 8:
+        return jsonify({'success': False, 'message': 'Password must be at least 8 characters.'}), 400
+
+    conn = database.get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone():
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'User with this email already exists.'}), 400
+        verification = conn.execute('''
+            SELECT id FROM email_verifications
+            WHERE email = ? AND token_hash = ? AND used_at IS NULL
+              AND expires_at > CURRENT_TIMESTAMP
+        ''', (email, email_token_digest(email, token))).fetchone()
+        if not verification:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Verify your email before registering.'}), 400
+        if device_account_limit_reached(conn, 'EMAIL'):
+            conn.rollback()
+            return jsonify({'success': False, 'message': device_limit_message('EMAIL')}), 429
+
+        referred_by = None
+        if ref_code:
+            ref_user = conn.execute('SELECT id FROM users WHERE referral_code = ?', (ref_code,)).fetchone()
+            if ref_user:
+                referred_by = ref_user['id']
+        new_code = generate_referral_code(name)
+        while conn.execute('SELECT id FROM users WHERE referral_code = ?', (new_code,)).fetchone():
+            new_code = generate_referral_code(name)
+        initial_bonus_paise = inr_to_paise('20.00')
+        synthetic_mobile = 'email-' + secrets.token_hex(16)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO users (name, mobile, email, password_hash, role, wallet_balance,
+                total_earned, referral_code, referred_by, signup_method)
+            VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?, 'EMAIL')
+        ''', (name, synthetic_mobile, email, generate_password_hash(password),
+              str(paise_to_inr(initial_bonus_paise)), str(paise_to_inr(initial_bonus_paise)),
+              new_code, referred_by))
+        new_user_id = cursor.lastrowid
+        cursor.execute('UPDATE users SET wallet_balance_paise = ?, total_earned_paise = ? WHERE id = ?',
+                       (initial_bonus_paise, initial_bonus_paise, new_user_id))
+        insert_wallet_transaction(cursor, new_user_id, 'referral_bonus', initial_bonus_paise,
+                                  initial_bonus_paise, f'SIGNUP-BONUS-{new_user_id}',
+                                  'Welcome Signup Bonus from TaskPe')
+        consumed = cursor.execute('''
+            UPDATE email_verifications SET used_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND used_at IS NULL
+        ''', (verification['id'],))
+        if consumed.rowcount != 1:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Email verification has expired. Please verify again.'}), 400
+        cursor.execute('''
+            INSERT INTO device_registrations (device_id_hash, signup_method, user_id)
+            VALUES (?, 'EMAIL', ?)
+        ''', (current_device_id_hash(), new_user_id))
+        conn.commit()
+    finally:
+        conn.close()
+    session['user_id'] = new_user_id
+    return jsonify({'success': True, 'message': 'Account created successfully! Welcome bonus ₹20 added.', 'user': {
+        'id': new_user_id, 'name': name, 'email': email, 'mobile': synthetic_mobile,
+        'role': 'user', 'wallet_balance': str(paise_to_inr(initial_bonus_paise)),
+        'total_earned': str(paise_to_inr(initial_bonus_paise)), 'referral_code': new_code,
+    }})
+
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     data = request.get_json() or {}
@@ -779,7 +1169,15 @@ def login():
         return jsonify({'success': False, 'message': 'Mobile/Email and Password are required.'}), 400
 
     conn = database.get_db_connection()
-    user = conn.execute("SELECT * FROM users WHERE email = ? OR mobile = ?", (identifier, identifier)).fetchone()
+    normalized_mobile = normalize_auth_mobile(identifier)
+    mobile_candidates = [identifier]
+    if re.fullmatch(r'[6-9]\d{9}', normalized_mobile):
+        mobile_candidates.extend((normalized_mobile, f'91{normalized_mobile}'))
+    mobile_placeholders = ', '.join('?' for _ in mobile_candidates)
+    user = conn.execute(
+        f"SELECT * FROM users WHERE email = ? OR mobile IN ({mobile_placeholders})",
+        (identifier, *mobile_candidates),
+    ).fetchone()
     conn.close()
 
     if not user or not check_password_hash(user['password_hash'], password):
@@ -839,71 +1237,85 @@ def logout():
     session.clear()
     return jsonify({'success': True, 'message': 'Logged out successfully.'})
 
+def otp_response(payload, status=200):
+    """Return a concrete Flask response for both route and internal callers."""
+    response = jsonify(payload)
+    response.status_code = status
+    return response
+
 @app.route('/api/auth/send-otp', methods=['POST'])
 def send_otp():
     data = request.get_json() or {}
     mobile = normalize_auth_mobile(data.get('mobile') or '')
     if not mobile or len(mobile) != 10 or not re.fullmatch(r'[6-9]\d{9}', mobile):
-        return jsonify({'success': False, 'message': 'Valid 10-digit mobile number required.'}), 400
+        return otp_response({'success': False, 'message': 'Valid 10-digit mobile number required.'}, 400)
 
     conn = database.get_db_connection()
-    conn.execute('BEGIN IMMEDIATE')
-    recent = conn.execute('''
-        SELECT 1 FROM otp_request_log
-        WHERE mobile = ? AND created_at > datetime('now', ?)
-        LIMIT 1
-    ''', (mobile, f'-{OTP_RESEND_COOLDOWN_SECONDS} seconds')).fetchone()
-    if not recent:
-        # Keep cooldown compatibility for OTP rows created before request
-        # history was introduced.
+    try:
+        # Hold the write transaction across the provider call. This serializes
+        # competing OTP requests so two concurrent requests cannot both pass
+        # the cooldown/hourly checks before a successful send is recorded.
+        conn.execute('BEGIN IMMEDIATE')
         recent = conn.execute('''
-            SELECT 1 FROM otps
+            SELECT 1 FROM otp_request_log
             WHERE mobile = ? AND created_at > datetime('now', ?)
             LIMIT 1
         ''', (mobile, f'-{OTP_RESEND_COOLDOWN_SECONDS} seconds')).fetchone()
-    hourly = conn.execute('''
-        SELECT COUNT(*) AS count FROM otp_request_log
-        WHERE mobile = ? AND created_at > datetime('now', '-1 hour')
-    ''', (mobile,)).fetchone()
-    if not hourly or hourly['count'] == 0:
+        if not recent:
+            # Keep cooldown compatibility for OTP rows created before request
+            # history was introduced.
+            recent = conn.execute('''
+                SELECT 1 FROM otps
+                WHERE mobile = ? AND created_at > datetime('now', ?)
+                LIMIT 1
+            ''', (mobile, f'-{OTP_RESEND_COOLDOWN_SECONDS} seconds')).fetchone()
         hourly = conn.execute('''
-            SELECT COUNT(*) AS count FROM otps
+            SELECT COUNT(*) AS count FROM otp_request_log
             WHERE mobile = ? AND created_at > datetime('now', '-1 hour')
         ''', (mobile,)).fetchone()
-    if recent:
+        if not hourly or hourly['count'] == 0:
+            hourly = conn.execute('''
+                SELECT COUNT(*) AS count FROM otps
+                WHERE mobile = ? AND created_at > datetime('now', '-1 hour')
+            ''', (mobile,)).fetchone()
+        if recent:
+            conn.rollback()
+            return otp_response({'success': False, 'message': 'Please wait before requesting another OTP.'}, 429)
+        if hourly and hourly['count'] >= OTP_MAX_REQUESTS_PER_HOUR:
+            conn.rollback()
+            return otp_response({'success': False, 'message': 'Too many OTP requests. Please try again later.'}, 429)
+
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        expires = (datetime.now() + timedelta(minutes=OTP_EXPIRY_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+        provider_failure_status = 502
+        if IS_PRODUCTION and (SMS_PROVIDER != 'fast2sms' or not FAST2SMS_ENABLED):
+            provider_result = FAST2SMS_PROVIDER_ERROR
+            provider_failure_status = 503
+        else:
+            provider_result = send_fast2sms_otp(mobile, otp)
+        if provider_result != FAST2SMS_SUCCESS:
+            # Count failed attempts toward the hourly abuse limit, but place
+            # them just outside the cooldown window so a provider outage does
+            # not create a misleading 60-second resend lockout.
+            conn.execute("INSERT INTO otp_request_log (mobile, created_at) VALUES (?, datetime('now', '-61 seconds'))", (mobile,))
+            conn.commit()
+            return otp_response({'success': False, 'message': 'Unable to send OTP right now. Please try again.'}, provider_failure_status)
+
+        # Only a confirmed provider success creates the usable OTP record and
+        # the current-time cooldown/rate-limit entry.
+        conn.execute('INSERT INTO otp_request_log (mobile) VALUES (?)', (mobile,))
+        # A new OTP invalidates any earlier registration verification for this phone.
+        conn.execute("DELETE FROM mobile_verifications WHERE mobile = ?", (mobile,))
+        conn.execute("""
+            INSERT INTO otps (mobile, otp_code, otp_hash, expires_at, attempt_count)
+            VALUES (?, ?, ?, ?, 0)
+        """, (mobile, '__hashed__', otp_digest(mobile, otp), expires))
+        conn.commit()
+    except Exception:
         conn.rollback()
+        raise
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Please wait before requesting another OTP.'}), 429
-    if hourly and hourly['count'] >= OTP_MAX_REQUESTS_PER_HOUR:
-        conn.rollback()
-        conn.close()
-        return jsonify({'success': False, 'message': 'Too many OTP requests. Please try again later.'}), 429
-
-    if IS_PRODUCTION and SMS_PROVIDER != 'fast2sms':
-        conn.rollback()
-        conn.close()
-        return jsonify({'success': False, 'message': 'Unable to send OTP right now. Please try again.'}), 503
-
-    # Reserve this request before contacting Fast2SMS.  This closes the abuse
-    # window even when the provider is unavailable and no OTP is stored.
-    conn.execute('INSERT INTO otp_request_log (mobile) VALUES (?)', (mobile,))
-    conn.commit()
-    conn.close()
-
-    otp = str(random.randint(100000, 999999))
-    expires = (datetime.now() + timedelta(minutes=OTP_EXPIRY_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
-    if not send_fast2sms_otp(mobile, otp):
-        return jsonify({'success': False, 'message': 'Unable to send OTP right now. Please try again.'}), 502
-
-    conn = database.get_db_connection()
-    # A new OTP invalidates any earlier registration verification for this phone.
-    conn.execute("DELETE FROM mobile_verifications WHERE mobile = ?", (mobile,))
-    conn.execute("""
-        INSERT INTO otps (mobile, otp_code, otp_hash, expires_at, attempt_count)
-        VALUES (?, ?, ?, ?, 0)
-    """, (mobile, '__hashed__', otp_digest(mobile, otp), expires))
-    conn.commit()
-    conn.close()
 
     response = {
         'success': True,
@@ -913,7 +1325,52 @@ def send_otp():
     # optional aid behind the explicit ENVIRONMENT=development switch.
     if IS_DEVELOPMENT:
         response['otp_code'] = otp
-    return jsonify(response)
+    return otp_response(response)
+
+@app.route('/api/auth/forgot-password', methods=['POST'])
+def forgot_password():
+    """Start reset without revealing whether the mobile belongs to an account."""
+    data = request.get_json() or {}
+    mobile = normalize_auth_mobile(data.get('mobile') or '')
+    generic = 'If the account exists, a verification code has been sent.'
+    if not mobile or not re.fullmatch(r'[6-9]\d{9}', mobile):
+        return jsonify({'success': False, 'message': 'Please enter a valid 10-digit mobile number.'}), 400
+
+    conn = database.get_db_connection()
+    user = conn.execute('SELECT id FROM users WHERE mobile = ?', (mobile,)).fetchone()
+    conn.close()
+    if not user:
+        logger.info('Password reset requested for an unrecognized account')
+        # Return an indistinguishable decoy challenge. It is intentionally not
+        # persisted and can never verify an OTP or reset a password.
+        return jsonify({'success': True, 'message': generic,
+                        'challenge_token': secrets.token_urlsafe(32)})
+
+    # Keep OTP generation, storage, provider handling, cooldown, and request
+    # limits in the existing implementation. Only normalize its success text.
+    response = send_otp()
+    if response.status_code == 200:
+        logger.info('Password reset requested')
+        payload = {'success': True, 'message': generic}
+        # Preserve the existing development-only testing aid without ever
+        # exposing an OTP in production.
+        if IS_DEVELOPMENT and response.get_json().get('otp_code'):
+            payload['otp_code'] = response.get_json()['otp_code']
+        challenge_token = secrets.token_urlsafe(32)
+        conn = database.get_db_connection()
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL', (user['id'],))
+        conn.execute('''
+            INSERT INTO password_reset_tokens
+                (user_id, mobile, token_hash, expires_at, verified_at)
+            VALUES (?, ?, ?, datetime('now', ?), NULL)
+        ''', (user['id'], mobile, reset_token_digest(challenge_token),
+              f'+{RESET_TOKEN_EXPIRY_MINUTES} minutes'))
+        conn.commit()
+        conn.close()
+        payload['challenge_token'] = challenge_token
+        return jsonify(payload)
+    return response
 
 @app.route('/api/auth/verify-otp', methods=['POST'])
 def verify_otp():
@@ -981,6 +1438,97 @@ def verify_otp():
 
     return jsonify({'success': True, 'message': 'Mobile number verified successfully!'})
 
+@app.route('/api/auth/forgot-password/verify', methods=['POST'])
+def verify_forgot_password_otp():
+    data = request.get_json() or {}
+    mobile = normalize_auth_mobile(data.get('mobile') or '')
+    challenge_token = (data.get('challenge_token') or '').strip()
+    otp_code = (data.get('otp_code') or '').strip()
+    if not mobile or not challenge_token or not re.fullmatch(r'[6-9]\d{9}', mobile) or not re.fullmatch(r'\d{6}', otp_code):
+        return jsonify({'success': False, 'message': 'Invalid or expired verification code.'}), 400
+
+    conn = database.get_db_connection()
+    user = conn.execute('SELECT id FROM users WHERE mobile = ?', (mobile,)).fetchone()
+    conn.close()
+    if not user:
+        return jsonify({'success': False, 'message': 'Invalid or expired verification code.'}), 400
+
+    conn = database.get_db_connection()
+    challenge = conn.execute('''
+        SELECT id FROM password_reset_tokens
+        WHERE token_hash = ? AND user_id = ? AND mobile = ?
+          AND verified_at IS NULL AND used_at IS NULL
+          AND expires_at > CURRENT_TIMESTAMP
+    ''', (reset_token_digest(challenge_token), user['id'], mobile)).fetchone()
+    conn.close()
+    if not challenge:
+        logger.info('Password reset OTP verification failed')
+        return jsonify({'success': False, 'message': 'Invalid or expired verification code.'}), 400
+
+    # Reuse the existing atomic, hashed, mobile-bound OTP verifier. Its
+    # one-time consumption prevents replay before a reset token is issued.
+    verification = verify_otp()
+    if verification.status_code != 200:
+        logger.info('Password reset OTP verification failed')
+        return jsonify({'success': False, 'message': 'Invalid or expired verification code.'}), 400
+
+    token = secrets.token_urlsafe(32)
+    conn = database.get_db_connection()
+    conn.execute('BEGIN IMMEDIATE')
+    updated = conn.execute('''
+        UPDATE password_reset_tokens
+        SET token_hash = ?, verified_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND verified_at IS NULL AND used_at IS NULL
+    ''', (reset_token_digest(token), challenge['id']))
+    if updated.rowcount != 1:
+        conn.rollback()
+        conn.close()
+        return jsonify({'success': False, 'message': 'Invalid or expired verification code.'}), 400
+    conn.commit()
+    conn.close()
+    logger.info('Password reset OTP verified')
+    return jsonify({'success': True, 'message': 'Verification successful.', 'reset_token': token})
+
+@app.route('/api/auth/reset-password', methods=['POST'])
+def reset_password():
+    data = request.get_json() or {}
+    token = (data.get('reset_token') or '').strip()
+    new_password = data.get('new_password') or ''
+    confirm_password = data.get('confirm_password') or ''
+    if not token:
+        return jsonify({'success': False, 'message': 'Invalid or expired reset request.'}), 400
+    if len(new_password) < 8:
+        return jsonify({'success': False, 'message': 'Password must be at least 8 characters.'}), 400
+    if new_password != confirm_password:
+        return jsonify({'success': False, 'message': 'Passwords do not match.'}), 400
+
+    conn = database.get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        reset = conn.execute('''
+            SELECT id, user_id FROM password_reset_tokens
+            WHERE token_hash = ? AND used_at IS NULL AND verified_at IS NOT NULL
+              AND expires_at > CURRENT_TIMESTAMP
+        ''', (reset_token_digest(token),)).fetchone()
+        if not reset:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Invalid or expired reset request.'}), 400
+        conn.execute('UPDATE users SET password_hash = ? WHERE id = ?',
+                     (generate_password_hash(new_password), reset['user_id']))
+        consumed = conn.execute('''
+            UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND used_at IS NULL
+        ''', (reset['id'],))
+        if consumed.rowcount != 1:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Invalid or expired reset request.'}), 400
+        conn.commit()
+    finally:
+        conn.close()
+    session.pop('user_id', None)
+    logger.info('Password reset completed')
+    return jsonify({'success': True, 'message': 'Password reset successfully. Please log in.'})
+
 # ----------------- TASKS APIS -----------------
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
@@ -1014,8 +1562,6 @@ def get_tasks():
                 'task_id': assignment['task_id'],
                 'status': assignment['status']
             }
-    per_message_rate = get_setting_number(conn, 'per_message_rate', 3.0)
-
     result = []
     for t in tasks:
         target_nums = []
@@ -1030,10 +1576,15 @@ def get_tasks():
             'id': t['id'],
             'title': t['title'],
             'category': t['category'],
+            'task_type': t['task_type'] or 'TEXT_LINK',
             'description': t['description'],
             'payout': calculate_task_payout(conn, t, t['recipients_per_slot'] or len(target_nums)),
-            'per_message_rate': per_message_rate,
+            'per_message_rate': float(paise_to_inr(t['reward_per_number_paise'] or inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3')))),
+            'reward_per_number': float(paise_to_inr(t['reward_per_number_paise'] or inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3')))),
+            'reward_source': t['reward_source'] or 'legacy_snapshot',
             'template_text': t['template_text'],
+            'image_url': f"/uploads/task-assets/{t['image_path']}" if t['image_path'] else None,
+            'destination_link': t['destination_link'],
             # Recipient pools are never returned from the dashboard.  Only a
             # private assignment may expose its allocated numbers.
             'target_numbers': [],
@@ -1087,29 +1638,12 @@ def take_task(task_id):
             already_used = conn.execute('''
                 SELECT 1 FROM recipient_allocations
                 WHERE campaign_id = ? AND phone_number = ?
+                  AND status IN ('ALLOCATED', 'COMPLETED')
             ''', (campaign_id, number)).fetchone()
-            cooldown = conn.execute('''
-                SELECT 1 FROM recipient_allocations
-                WHERE campaign_id != ? AND phone_number = ?
-                  AND last_contacted_at >= datetime('now', '-7 days')
-            ''', (campaign_id, number)).fetchone()
-            if not already_used and not cooldown:
+            if not already_used:
                 available.append(number)
             if len(available) == required:
                 break
-        if len(available) < required:
-            reusable = get_reusable_target_numbers(
-                conn,
-                campaign_id=campaign_id,
-                candidate_numbers=task_recipient_pool(task),
-                user_id=user['id'],
-                limit=required - len(available),
-            )
-            for number in reusable:
-                if number not in available:
-                    available.append(number)
-                if len(available) == required:
-                    break
         if len(available) < required:
             return jsonify({
                 'success': False,
@@ -1124,8 +1658,9 @@ def take_task(task_id):
         ''', (user['id'], task_id, campaign_id, task['category'], json.dumps(available), expiry_modifier))
         assignment_id = cursor.lastrowid
         cursor.executemany('''
-            INSERT INTO recipient_allocations (campaign_id, phone_number, assignment_id, user_id, last_contacted_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO recipient_allocations
+                (campaign_id, phone_number, assignment_id, user_id, last_contacted_at, status)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 'ALLOCATED')
         ''', [(campaign_id, number, assignment_id, user['id']) for number in available])
         conn.commit()
         return jsonify({'success': True, 'assignment_id': assignment_id, 'message': f'{len(available)} unique recipients assigned.'})
@@ -1167,8 +1702,10 @@ def get_task_detail(task_id):
                 'submitted_at': sub['submitted_at']
             }
 
-    per_message_rate = get_setting_number(conn, 'per_message_rate', 3.0)
     payout = calculate_task_payout(conn, task, len(target_nums) or (task['recipients_per_slot'] or 0))
+    reward_per_number = float(paise_to_inr(
+        task['reward_per_number_paise'] or inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3'))
+    ))
     occupied_slots = conn.execute('''
         SELECT COUNT(*) AS count FROM task_assignments
         WHERE task_id = ? AND status IN ('in_progress', 'pending_review', 'paid')
@@ -1184,10 +1721,15 @@ def get_task_detail(task_id):
             'id': task['id'],
             'title': task['title'],
             'category': task['category'],
+            'task_type': task['task_type'] or 'TEXT_LINK',
             'description': task['description'],
             'payout': payout,
-            'per_message_rate': per_message_rate,
+            'per_message_rate': reward_per_number,
+            'reward_per_number': reward_per_number,
+            'reward_source': task['reward_source'] or 'legacy_snapshot',
             'template_text': task['template_text'],
+            'image_url': f"/uploads/task-assets/{task['image_path']}" if task['image_path'] else None,
+            'destination_link': task['destination_link'],
             'target_numbers': target_nums,
             'time_limit_minutes': task['time_limit_minutes'],
             'proof_instructions': task['proof_instructions'],
@@ -1253,6 +1795,7 @@ def cancel_task_assignment(task_id):
         if submitted:
             conn.rollback()
             return jsonify({'success': False, 'message': 'Submitted tasks cannot be cancelled.'}), 400
+        conn.execute("UPDATE recipient_allocations SET status = 'RELEASED' WHERE assignment_id = ? AND status = 'ALLOCATED'", (assignment['id'],))
         conn.execute("UPDATE task_assignments SET status = 'cancelled', slot_released = 1 WHERE id = ?", (assignment['id'],))
         conn.commit()
         return jsonify({'success': True, 'message': 'Task cancelled and slot released.'})
@@ -1366,6 +1909,7 @@ def submit_task_proof(task_id):
     ''', (user['id'], task_id, assignment['id'], filenames[0], notes, sub_status, admin_feedback, str(paise_to_inr(payout_amount_paise)), payout_amount_paise, audit_badge, audit_score, numbers_detected, numbers_required, audit_res['invalid_count'], numbers_detected if is_auto_approved else None, is_auto_approved, reviewed_at, numbers_required, numbers_detected, approval_minimum, str(paise_to_inr(per_number_rate_paise)), per_number_rate_paise))
     sub_id = cursor.lastrowid
     if is_auto_approved:
+        settle_recipient_allocations_for_approval(conn, assignment['id'])
         finalize_target_records_for_approval(
             conn, assignment['id'], numbers_detected, per_number_rate,
             submission_id=sub_id, task_id=task_id,
@@ -1925,6 +2469,7 @@ def admin_approve_submission(sub_id):
         insert_wallet_transaction(cursor, sub['user_id'], 'task_reward', payout_paise, balance_paise, f"SUB-{sub_id}", f"Approved reward for: {task_title}", sub_id)
         worker = cursor.execute("SELECT * FROM users WHERE id = ?", (sub['user_id'],)).fetchone()
         credit_referrer_for_task(cursor, worker, paise_to_inr(payout_paise), sub_id)
+        settle_recipient_allocations_for_approval(conn, sub['assignment_id'])
         finalize_target_records_for_approval(
             conn, sub['assignment_id'], verified_count,
             str(paise_to_inr(rate_paise)),
@@ -2009,6 +2554,7 @@ def admin_approve_partial_submission(sub_id):
         insert_wallet_transaction(cursor, sub['user_id'], 'task_reward', payout_paise, balance_paise, f"PARTIAL-SUB-{sub_id}", feedback, sub_id)
         worker = cursor.execute("SELECT * FROM users WHERE id = ?", (sub['user_id'],)).fetchone()
         credit_referrer_for_task(cursor, worker, paise_to_inr(payout_paise), sub_id)
+        settle_recipient_allocations_for_approval(conn, sub['assignment_id'])
         finalize_target_records_for_approval(
         conn, sub['assignment_id'], valid_count,
         str(paise_to_inr(rate_paise)),
@@ -2062,6 +2608,7 @@ def admin_reject_submission(sub_id):
         UPDATE task_assignments SET status = 'rejected', completed_at = CURRENT_TIMESTAMP
         WHERE id = ? AND status IN ('in_progress', 'pending_review')
     ''', (sub['assignment_id'],))
+    cursor.execute("UPDATE recipient_allocations SET status = 'RELEASED' WHERE assignment_id = ? AND status = 'ALLOCATED'", (sub['assignment_id'],))
 
     # Release 1 completed slot
     cursor.execute("UPDATE tasks SET completed_slots = MAX(0, completed_slots - 1) WHERE id = ?", (sub['task_id'],))
@@ -2321,19 +2868,32 @@ def admin_users():
 @app.route('/api/admin/tasks/create', methods=['POST'])
 @admin_required
 def admin_create_task():
-    data = request.get_json() or {}
+    is_multipart = request.mimetype == 'multipart/form-data'
+    data = request.form.to_dict() if is_multipart else (request.get_json(silent=True) or {})
     title = (data.get('title') or '').strip()
     category = data.get('category', 'Direct Message')
     description = (data.get('description') or '').strip()
     template_text = (data.get('template_text') or '').strip()
     numbers_raw = data.get('target_numbers') or []
-    time_limit = int(data.get('time_limit_minutes', 15))
+    try:
+        time_limit = int(data.get('time_limit_minutes', 15))
+        total_slots = int(data.get('total_slots', 100))
+        recipients_per_slot = int(data.get('recipients_per_slot', 25))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'Slot and time values must be whole numbers.'}), 400
     proof_instructions = (data.get('proof_instructions') or 'Upload screenshot showing sent message.').strip()
-    total_slots = int(data.get('total_slots', 100))
-    recipients_per_slot = int(data.get('recipients_per_slot', 25))
+    task_type = (data.get('task_type') or '').strip().upper()
+    if not task_type:
+        task_type = 'IMAGE_TEXT_LINK' if category == 'IMAGE_TEXT_LINK' else 'TEXT_LINK'
+    if task_type not in {'TEXT_LINK', 'IMAGE_TEXT_LINK'}:
+        return jsonify({'success': False, 'message': 'Unsupported task type.'}), 400
+    if task_type == 'IMAGE_TEXT_LINK':
+        category = 'IMAGE_TEXT_LINK'
 
     if not title or not description or not template_text:
         return jsonify({'success': False, 'message': 'Title, description, and template are required.'}), 400
+    if time_limit < 1 or total_slots < 1 or recipients_per_slot < 1:
+        return jsonify({'success': False, 'message': 'Slot and time values must be positive.'}), 400
 
     if isinstance(numbers_raw, str):
         # Split by comma, space, or newline
@@ -2342,8 +2902,6 @@ def admin_create_task():
         nums = [str(n).strip().replace(' ', '').replace('+', '') for n in numbers_raw if str(n).strip()]
 
     nums = list(dict.fromkeys(normalize_phone_number(number) for number in nums if normalize_phone_number(number)))
-    if recipients_per_slot < 1:
-        return jsonify({'success': False, 'message': 'Recipients per earner must be at least 1.'}), 400
     required_pool_size = total_slots * recipients_per_slot
     if len(nums) < required_pool_size:
         return jsonify({
@@ -2351,20 +2909,59 @@ def admin_create_task():
             'message': f'Need {required_pool_size} unique target numbers for {total_slots} slots × {recipients_per_slot} recipients. Received {len(nums)}.'
         }), 400
 
+    use_default = str(data.get('use_default_reward', '1')).strip().lower() not in {'0', 'false', 'no', 'off'}
     conn = database.get_db_connection()
-    # The backend fixes each campaign's payout using the rate in force now.
-    # Changing the setting later cannot rewrite historical task/submission rewards.
-    payout = calculate_task_payout(conn, {'recipients_per_slot': recipients_per_slot, 'target_numbers': '[]'}, recipients_per_slot)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO tasks (title, category, description, payout, payout_paise, template_text, target_numbers, recipients_per_slot, time_limit_minutes, proof_instructions, total_slots, completed_slots, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active')
-    ''', (title, category, description, payout, inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3')) * recipients_per_slot,
-          template_text, json.dumps(nums), recipients_per_slot, time_limit, proof_instructions, total_slots))
-    task_id = cursor.lastrowid
-    cursor.execute("UPDATE tasks SET campaign_id = ? WHERE id = ?", (task_id, task_id))
-    conn.commit()
-    conn.close()
+    image_file = request.files.get('campaign_image') or request.files.get('image') if is_multipart else None
+    image_path = None
+    try:
+        default_rate_paise = inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3'))
+        if use_default:
+            reward_paise = default_rate_paise
+            reward_source = 'default_at_creation'
+        else:
+            try:
+                reward_paise = inr_to_paise(Decimal(str(data.get('reward_per_number', '')).strip()))
+            except (ArithmeticError, TypeError, ValueError):
+                return jsonify({'success': False, 'message': 'Enter a valid reward per verified number.'}), 400
+            if reward_paise <= 0:
+                return jsonify({'success': False, 'message': 'Reward per verified number must be positive.'}), 400
+            reward_source = 'admin_override'
+
+        destination_link = normalize_task_destination(data.get('destination_link')) if task_type == 'IMAGE_TEXT_LINK' else None
+        if task_type == 'IMAGE_TEXT_LINK' and not destination_link:
+            return jsonify({'success': False, 'message': 'A valid HTTP(S) destination link is required.'}), 400
+        if task_type == 'IMAGE_TEXT_LINK':
+            if not image_file or not image_file.filename or not allowed_file(image_file.filename) or not valid_image_content(image_file):
+                return jsonify({'success': False, 'message': 'Upload a valid PNG, JPG, JPEG, or WEBP campaign image.'}), 400
+            extension = secure_filename(image_file.filename).rsplit('.', 1)[-1].lower()
+            image_path = f'campaign_{secrets.token_hex(16)}.{extension}'
+            image_file.save(os.path.join(app.config['TASK_ASSET_FOLDER'], image_path))
+
+        payout_paise = reward_paise * recipients_per_slot
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO tasks (title, category, description, payout, payout_paise, template_text,
+                target_numbers, recipients_per_slot, time_limit_minutes, proof_instructions,
+                total_slots, completed_slots, status, task_type, image_path, destination_link,
+                reward_per_number_paise, reward_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
+        ''', (title, category, description, float(paise_to_inr(payout_paise)), payout_paise,
+              template_text, json.dumps(nums), recipients_per_slot, time_limit,
+              proof_instructions, total_slots, task_type, image_path, destination_link,
+              reward_paise, reward_source))
+        task_id = cursor.lastrowid
+        cursor.execute("UPDATE tasks SET campaign_id = ? WHERE id = ?", (task_id, task_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if image_path:
+            try:
+                os.remove(os.path.join(app.config['TASK_ASSET_FOLDER'], image_path))
+            except OSError:
+                pass
+        raise
+    finally:
+        conn.close()
 
     return jsonify({'success': True, 'message': f'Task #{task_id} created and published!', 'task_id': task_id})
 
@@ -2462,6 +3059,9 @@ def admin_list_tasks():
             ''', (task['id'],)).fetchall()
             result.append({
                 'id': task['id'], 'title': task['title'], 'category': task['category'],
+                'task_type': task['task_type'] or 'TEXT_LINK',
+                'reward_per_number': float(paise_to_inr(task['reward_per_number_paise'] or inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3')))),
+                'reward_source': task['reward_source'] or 'legacy_snapshot',
                 'status': task['status'], 'payout': task['payout'],
                 'total_slots': task['total_slots'], 'completed_slots': task['completed_slots'],
                 'created_at': task['created_at'], 'campaign_id': task['campaign_id'],
@@ -2561,6 +3161,7 @@ def admin_release_task_assignment(assignment_id):
         ''', (assignment_id,))
         if conn.execute('SELECT changes()').fetchone()[0] != 1:
             return jsonify({'success': True, 'already_released': True, 'message': 'Assignment is already released.'})
+        conn.execute("UPDATE recipient_allocations SET status = 'RELEASED' WHERE assignment_id = ? AND status = 'ALLOCATED'", (assignment_id,))
         conn.execute('''
             INSERT INTO admin_assignment_release_audit
                 (assignment_id, admin_user_id, worker_user_id, task_id, old_status, new_status, reason)

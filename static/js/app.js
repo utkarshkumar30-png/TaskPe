@@ -10,6 +10,8 @@ let workerUsdtInrRate = 0;
 let selectedProofFiles = [];
 let submissionProofUrls = {};
 let activeLightboxProofs = [];
+let passwordResetToken = null;
+let passwordResetChallenge = null;
 
 // ================= INITIALIZATION =================
 document.addEventListener('DOMContentLoaded', async () => {
@@ -96,6 +98,12 @@ async function checkAuth() {
 }
 
 function renderUserLoggedIn() {
+  // Login responses from older/staging databases may contain numeric values
+  // serialized as strings. Normalize them before using number-only methods.
+  currentUser.wallet_balance = Number(currentUser.wallet_balance) || 0;
+  currentUser.total_earned = Number(currentUser.total_earned) || 0;
+  currentUser.name = String(currentUser.name || 'User');
+  currentUser.role = String(currentUser.role || 'user');
   document.getElementById('auth-buttons-logged-out').classList.add('hidden');
   document.getElementById('auth-buttons-logged-in').classList.remove('hidden');
   document.getElementById('earner-stats-strip').classList.remove('hidden');
@@ -153,6 +161,90 @@ async function handleLoginSubmit(e) {
   }
 }
 
+function togglePasswordVisibility(inputId, button) {
+  const input = document.getElementById(inputId);
+  const visible = input.type === 'text';
+  input.type = visible ? 'password' : 'text';
+  button.setAttribute('aria-label', visible ? 'Show password' : 'Hide password');
+  const icon = button.querySelector('i');
+  if (icon) icon.className = visible ? 'fa-solid fa-eye' : 'fa-solid fa-eye-slash';
+}
+
+function openForgotPassword() {
+  passwordResetToken = null;
+  passwordResetChallenge = null;
+  resetForgotPasswordForm();
+  document.getElementById('auth-tab-login').parentElement.classList.add('hidden');
+  document.getElementById('form-login').classList.add('hidden');
+  document.getElementById('form-signup').classList.add('hidden');
+  document.getElementById('form-reset-password').classList.add('hidden');
+  document.getElementById('form-forgot-password').classList.remove('hidden');
+}
+
+async function handleForgotPasswordSubmit(e) {
+  e.preventDefault();
+  const mobile = document.getElementById('reset-mobile').value.trim();
+  try {
+    const res = await fetch('/api/auth/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mobile }) });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.message || 'Unable to send OTP.');
+    passwordResetChallenge = data.challenge_token || null;
+    document.getElementById('form-forgot-password').classList.add('hidden');
+    document.getElementById('form-reset-password').classList.remove('hidden');
+    showToast(data.message, 'success');
+  } catch (err) { showToast(err.message || 'Unable to send OTP. Please retry.', 'error'); }
+}
+
+async function handleResetPasswordSubmit(e) {
+  e.preventDefault();
+  const mobile = document.getElementById('reset-mobile').value.trim();
+  const otp_code = document.getElementById('reset-otp').value.trim();
+  try {
+    if (!passwordResetToken) {
+      const verifyRes = await fetch('/api/auth/forgot-password/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mobile, challenge_token: passwordResetChallenge, otp_code }) });
+      const verifyData = await verifyRes.json();
+      if (!verifyRes.ok || !verifyData.success) throw new Error(verifyData.message || 'Invalid or expired verification code.');
+      passwordResetToken = verifyData.reset_token;
+      document.getElementById('reset-password-fields').classList.remove('hidden');
+      document.getElementById('reset-new-password').required = true;
+      document.getElementById('reset-confirm-password').required = true;
+      document.getElementById('reset-form-title').textContent = 'Create a new password';
+      document.getElementById('reset-form-help').textContent = 'Choose a new password for your TaskPe account.';
+      document.getElementById('reset-submit-button').textContent = 'Reset Password';
+      showToast('OTP verified. Create a new password.', 'success');
+      return;
+    }
+    const new_password = document.getElementById('reset-new-password').value;
+    const confirm_password = document.getElementById('reset-confirm-password').value;
+    const resetRes = await fetch('/api/auth/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reset_token: passwordResetToken, new_password, confirm_password }) });
+    const resetData = await resetRes.json();
+    if (!resetRes.ok || !resetData.success) throw new Error(resetData.message || 'Unable to reset password.');
+    passwordResetToken = null;
+    passwordResetChallenge = null;
+    showToast(resetData.message, 'success');
+    switchAuthTab('login');
+  } catch (err) { showToast(err.message || 'Password reset failed. Please retry.', 'error'); }
+}
+
+function resetForgotPasswordForm() {
+  const setValue = (id, value) => { const element = document.getElementById(id); if (element) element.value = value; };
+  const setClass = (id, className) => { const element = document.getElementById(id); if (element) element.className = className; };
+  const setText = (id, value) => { const element = document.getElementById(id); if (element) element.textContent = value; };
+  setValue('reset-mobile', '');
+  setValue('reset-otp', '');
+  setValue('reset-new-password', '');
+  setValue('reset-confirm-password', '');
+  const fields = document.getElementById('reset-password-fields');
+  if (fields) fields.classList.add('hidden');
+  const newPassword = document.getElementById('reset-new-password');
+  const confirmPassword = document.getElementById('reset-confirm-password');
+  if (newPassword) newPassword.required = false;
+  if (confirmPassword) confirmPassword.required = false;
+  setText('reset-form-title', 'Verify OTP');
+  setText('reset-form-help', 'Enter the OTP sent to your mobile.');
+  setText('reset-submit-button', 'Verify OTP');
+}
+
 async function handleSignupSubmit(e) {
   e.preventDefault();
   const name = document.getElementById('signup-name').value.trim();
@@ -207,6 +299,51 @@ async function handleSignupSubmit(e) {
   }
 }
 
+function switchSignupMethod(method) {
+  const mobileForm = document.getElementById('form-signup');
+  const emailForm = document.getElementById('form-signup-email');
+  if (!mobileForm || !emailForm) return;
+  mobileForm.classList.toggle('hidden', method !== 'mobile');
+  emailForm.classList.toggle('hidden', method !== 'email');
+}
+
+async function sendEmailVerification() {
+  const email = document.getElementById('email-signup-email').value.trim();
+  try {
+    const response = await fetch('/api/auth/send-email-verification', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to send verification.');
+    if (data.verification_token) document.getElementById('email-signup-token').value = data.verification_token;
+    showToast(data.message, 'success');
+  } catch (err) { showToast(err.message || 'Unable to send verification.', 'error'); }
+}
+
+async function handleEmailSignupSubmit(e) {
+  e.preventDefault();
+  const payload = {
+    name: document.getElementById('email-signup-name').value.trim(),
+    email: document.getElementById('email-signup-email').value.trim(),
+    password: document.getElementById('email-signup-password').value,
+    referral_code: document.getElementById('email-signup-referral').value.trim(),
+    verification_token: document.getElementById('email-signup-token').value.trim()
+  };
+  try {
+    const response = await fetch('/api/auth/verify-email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: payload.email, verification_token: payload.verification_token }) });
+    const verification = await response.json();
+    if (!response.ok || !verification.success) throw new Error(verification.message || 'Verify your email before registering.');
+    const registerResponse = await fetch('/api/auth/register-email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await registerResponse.json();
+    if (!registerResponse.ok || !data.success) throw new Error(data.message || 'Email signup failed.');
+    showToast(data.message, 'success');
+    currentUser = data.user;
+    renderUserLoggedIn();
+    closeAuthModal();
+    navigate('tasks');
+  } catch (err) { showToast(err.message || 'Email signup failed.', 'error'); }
+}
+
 async function sendMobileOtp() {
   const mobile = document.getElementById('signup-mobile').value.trim();
   if (!mobile || mobile.length < 10) {
@@ -235,7 +372,11 @@ async function sendMobileOtp() {
 
 async function logout(toGuest = false) {
   try {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    const logoutResponse = await fetch('/api/auth/logout', { method: 'POST' });
+    if (!logoutResponse.ok) throw new Error('Logout failed.');
+    // logout() clears the Flask session, including its CSRF token. Refresh the
+    // page-level token before any subsequent login/signup/reset POST.
+    await refreshCsrfToken();
     currentUser = null;
     renderUserLoggedOut();
     showToast(toGuest ? 'Switched to Guest mode.' : 'Logged out.', 'info');
@@ -245,6 +386,14 @@ async function logout(toGuest = false) {
   }
 }
 
+async function refreshCsrfToken() {
+  const response = await fetch('/api/auth/csrf', { cache: 'no-store' });
+  const data = await response.json();
+  if (!response.ok || !data.success || !data.csrf_token) throw new Error('Unable to refresh CSRF token.');
+  window.__TASKPE_CSRF__ = data.csrf_token;
+  return data.csrf_token;
+}
+
 function openAuthModal(tab = 'login') {
   document.getElementById('modal-auth').classList.remove('hidden');
   document.body.classList.add('modal-open');
@@ -252,6 +401,9 @@ function openAuthModal(tab = 'login') {
 }
 
 function closeAuthModal() {
+  passwordResetToken = null;
+  passwordResetChallenge = null;
+  resetForgotPasswordForm();
   document.getElementById('modal-auth').classList.add('hidden');
   document.body.classList.remove('modal-open');
 }
@@ -269,6 +421,14 @@ function switchAuthTab(tab) {
   const signupTab = document.getElementById('auth-tab-signup');
   const loginForm = document.getElementById('form-login');
   const signupForm = document.getElementById('form-signup');
+  const emailSignupForm = document.getElementById('form-signup-email');
+  const forgotForm = document.getElementById('form-forgot-password');
+  const resetForm = document.getElementById('form-reset-password');
+  const tabs = loginTab.parentElement;
+  tabs.classList.remove('hidden');
+  forgotForm.classList.add('hidden');
+  resetForm.classList.add('hidden');
+  emailSignupForm.classList.add('hidden');
 
   if (tab === 'login') {
     loginTab.classList.add('text-emerald-400', 'border-emerald-400');
@@ -277,12 +437,14 @@ function switchAuthTab(tab) {
     signupTab.classList.remove('text-emerald-400', 'border-emerald-400');
     loginForm.classList.remove('hidden');
     signupForm.classList.add('hidden');
+    emailSignupForm.classList.add('hidden');
   } else {
     signupTab.classList.add('text-emerald-400', 'border-emerald-400');
     signupTab.classList.remove('text-slate-400', 'border-transparent');
     loginTab.classList.add('text-slate-400', 'border-transparent');
     loginTab.classList.remove('text-emerald-400', 'border-emerald-400');
     signupForm.classList.remove('hidden');
+    switchSignupMethod('mobile');
     loginForm.classList.add('hidden');
   }
 }
@@ -484,18 +646,36 @@ function renderTaskDetailView(task) {
   document.getElementById('detail-task-desc').innerText = task.description;
   document.getElementById('detail-task-payout').innerText = task.payout.toFixed(2);
   document.getElementById('submit-btn-payout').innerText = task.payout.toFixed(2);
-  document.getElementById('detail-template-text').innerText = task.template_text;
+  const preparedMessage = task.destination_link && !task.template_text.includes(task.destination_link)
+    ? `${task.template_text}\n\n${task.destination_link}` : task.template_text;
+  document.getElementById('detail-template-text').innerText = preparedMessage;
   document.getElementById('detail-proof-instructions').innerText = task.proof_instructions;
   document.getElementById('detail-numbers-count').innerText = `(${task.target_numbers.length} Numbers)`;
+  const asset = document.getElementById('detail-campaign-asset');
+  const imageView = document.getElementById('detail-image-view');
+  const imageDownload = document.getElementById('detail-image-download');
+  const workflow = document.getElementById('detail-image-workflow');
+  const image = document.getElementById('detail-task-image');
+  const link = document.getElementById('detail-destination-link');
+  const imageTask = task.task_type === 'IMAGE_TEXT_LINK';
+  asset.classList.toggle('hidden', !imageTask);
+  workflow.classList.toggle('hidden', !imageTask);
+  imageView.classList.toggle('hidden', !imageTask || !task.image_url);
+  imageDownload.classList.toggle('hidden', !imageTask || !task.image_url);
+  imageDownload.classList.toggle('inline-flex', imageTask && !!task.image_url);
+  image.classList.toggle('hidden', !imageTask || !task.image_url);
+  if (task.image_url) { image.src = task.image_url; imageView.href = task.image_url; imageDownload.href = task.image_url; }
+  link.classList.toggle('hidden', !imageTask || !task.destination_link);
+  if (task.destination_link) { link.href = task.destination_link; link.textContent = task.destination_link; }
 
   // Render Target Numbers with WhatsApp Direct links (wa.me)
   const numbersList = document.getElementById('detail-numbers-list');
-  const encodedTemplate = encodeURIComponent(task.template_text);
   const openedRecipients = new Set(JSON.parse(localStorage.getItem(`taskpe-opened-${task.id}`) || '[]'));
 
   numbersList.innerHTML = task.target_numbers.map((num, i) => {
-    const cleanNum = num.replace(/\D/g, '');
-    const waUrl = `https://wa.me/${cleanNum}?text=${encodedTemplate}`;
+    const cleanNum = String(num ?? '').replace(/\D/g, '');
+    const waUrl = buildWhatsAppUrl(cleanNum, preparedMessage);
+    if (!waUrl) return '';
     const opened = openedRecipients.has(cleanNum);
 
     return `
@@ -511,7 +691,7 @@ function renderTaskDetailView(task) {
           <span id="recipient-state-${cleanNum}" class="text-[10px] ${opened ? 'text-emerald-400' : 'text-slate-500'}">${opened ? 'Opened' : 'Pending'}</span>
           <a href="${waUrl}" target="_blank" rel="noopener noreferrer" onclick="markRecipientOpened(${task.id}, '${cleanNum}')" class="min-h-11 px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold transition flex items-center gap-1">
             <i class="fa-brands fa-whatsapp text-sm"></i>
-            <span>Send</span>
+            <span>Open WhatsApp</span>
           </a>
         </div>
       </div>
@@ -569,6 +749,12 @@ function renderTaskDetailView(task) {
   selectedProofFiles = [];
   document.getElementById('proof-file-input').value = '';
   renderProofPreviews();
+}
+
+function buildWhatsAppUrl(phone, message) {
+  const normalizedPhone = String(phone ?? '').replace(/\D/g, '');
+  if (!normalizedPhone) return null;
+  return `https://wa.me/${normalizedPhone}?text=${encodeURIComponent(String(message ?? ''))}`;
 }
 
 function markRecipientOpened(taskId, number) {
@@ -656,7 +842,9 @@ async function cancelActiveTask() {
 
 function copyTemplateText() {
   if (!activeTask) return;
-  navigator.clipboard.writeText(activeTask.template_text).then(() => {
+  const message = activeTask.destination_link && !activeTask.template_text.includes(activeTask.destination_link)
+    ? `${activeTask.template_text}\n\n${activeTask.destination_link}` : activeTask.template_text;
+  navigator.clipboard.writeText(message).then(() => {
     const label = document.getElementById('copy-btn-label');
     label.innerText = 'Copied!';
     showToast('Template copied to clipboard!', 'success');
@@ -1430,7 +1618,9 @@ async function handleCreateTaskSubmit(e) {
   if (createTaskInFlight || !formElement.reportValidity()) return;
   const title = document.getElementById('newtask-title').value.trim();
   const category = document.getElementById('newtask-category').value;
-  const payout = parseFloat(document.getElementById('newtask-payout').value) || 0;
+  const reward = document.getElementById('newtask-reward').value;
+  const useDefaultReward = document.getElementById('newtask-use-default').checked;
+  const imageTask = category === 'IMAGE_TEXT_LINK';
   const description = document.getElementById('newtask-desc').value.trim();
   const template_text = document.getElementById('newtask-template').value.trim();
   const target_numbers = document.getElementById('newtask-numbers').value.trim();
@@ -1447,21 +1637,16 @@ async function handleCreateTaskSubmit(e) {
   if (submitButton) { submitButton.disabled = true; submitButton.textContent = 'Publishing…'; }
 
   try {
+    const form = new FormData();
+    form.set('title', title); form.set('category', category); form.set('task_type', imageTask ? 'IMAGE_TEXT_LINK' : 'TEXT_LINK');
+    form.set('description', description); form.set('template_text', template_text); form.set('target_numbers', target_numbers);
+    form.set('total_slots', total_slots); form.set('recipients_per_slot', recipients_per_slot); form.set('time_limit_minutes', time_limit_minutes);
+    form.set('proof_instructions', proof_instructions); form.set('use_default_reward', useDefaultReward ? '1' : '0');
+    if (reward) form.set('reward_per_number', reward);
+    if (imageTask) { form.set('destination_link', document.getElementById('newtask-link').value.trim()); const image = document.getElementById('newtask-image').files[0]; if (image) form.set('campaign_image', image); }
     const res = await fetch('/api/admin/tasks/create', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title,
-        category,
-        payout,
-        description,
-        template_text,
-        target_numbers,
-        total_slots,
-        recipients_per_slot,
-        time_limit_minutes,
-        proof_instructions
-      })
+      body: form
     });
     const data = await res.json();
     if (data.success) {
@@ -1480,6 +1665,17 @@ async function handleCreateTaskSubmit(e) {
     showToast('Failed to publish task', 'error');
   }
 }
+
+function updateCreateTaskTypeFields() {
+  const image = document.getElementById('newtask-category')?.value === 'IMAGE_TEXT_LINK';
+  const fields = document.getElementById('newtask-image-fields');
+  if (!fields) return;
+  fields.classList.toggle('hidden', !image);
+  document.getElementById('newtask-image').required = image;
+  document.getElementById('newtask-link').required = image;
+}
+document.getElementById('newtask-category')?.addEventListener('change', updateCreateTaskTypeFields);
+updateCreateTaskTypeFields();
 
 // ================= LIGHTBOX PREVIEW =================
 function openSubmissionLightbox(subId, caption, payout, status, auditBadge = '', auditScore = 95, numFound = 0, numReq = 0, invalidCount = 0) {

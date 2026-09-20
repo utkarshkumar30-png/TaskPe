@@ -9,6 +9,8 @@ _ROOT = tempfile.mkdtemp(prefix='taskpe-target-records-')
 os.environ['TASKPE_DB_PATH'] = os.path.join(_ROOT, 'targets.db')
 os.environ['ENVIRONMENT'] = 'production'
 os.environ['SECRET_KEY'] = 'target-record-test-secret'
+os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(_ROOT, 'proofs')
+os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(_ROOT, 'assets')
 
 import database
 from app import finalize_target_records_for_approval, get_reusable_target_numbers

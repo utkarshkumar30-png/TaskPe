@@ -15,6 +15,8 @@ import app as app_module
 
 class SlotAvailabilityTests(unittest.TestCase):
     def setUp(self):
+        os.environ['ENVIRONMENT'] = 'development'
+        os.environ['SECRET_KEY'] = 'slot-test-secret'
         if os.path.exists(database.DB_PATH):
             os.remove(database.DB_PATH)
         self.app_module = __import__('importlib').reload(app_module)

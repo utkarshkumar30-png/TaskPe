@@ -20,13 +20,18 @@ from werkzeug.security import generate_password_hash
 class SecurityHardeningTests(unittest.TestCase):
     def setUp(self):
         global app_module
+        database.DB_PATH = os.path.join(_TEST_ROOT, 'taskpe.db')
+        os.environ['TASKPE_DB_PATH'] = database.DB_PATH
         if os.path.exists(database.DB_PATH):
             os.remove(database.DB_PATH)
         os.environ['ENVIRONMENT'] = 'production'
         os.environ['SECRET_KEY'] = 'production-test-secret-that-is-not-returned'
+        os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(_TEST_ROOT, 'proofs')
+        os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(_TEST_ROOT, 'assets')
         os.environ.pop('TASKPE_ADMIN_EMAIL', None)
         os.environ.pop('TASKPE_ADMIN_PASSWORD', None)
         os.environ.pop('TASKPE_ADMIN_MOBILE', None)
+        database.initialize_database()
         app_module = importlib.reload(app_module)
         app_module.app.config['TESTING'] = True
         self.client = app_module.app.test_client()
@@ -78,6 +83,42 @@ class SecurityHardeningTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('SECRET_KEY must be set', result.stderr)
+
+    def test_production_requires_explicit_persistent_paths(self):
+        env = os.environ.copy()
+        env.update({
+            'ENVIRONMENT': 'production',
+            'SECRET_KEY': 'production-test-secret',
+            'TASKPE_UPLOAD_FOLDER': os.path.join(_TEST_ROOT, 'proofs'),
+            'TASKPE_TASK_ASSET_FOLDER': os.path.join(_TEST_ROOT, 'assets'),
+        })
+        env.pop('TASKPE_DB_PATH', None)
+        result = subprocess.run(
+            [sys.executable, '-c', 'import app'], cwd=os.path.dirname(__file__),
+            env=env, capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('TASKPE_DB_PATH must be set', result.stderr)
+
+    def test_smtp_provider_requires_complete_production_configuration(self):
+        env = os.environ.copy()
+        env.update({
+            'ENVIRONMENT': 'production',
+            'SECRET_KEY': 'production-test-secret',
+            'TASKPE_DB_PATH': os.path.join(_TEST_ROOT, 'smtp-config.db'),
+            'TASKPE_UPLOAD_FOLDER': os.path.join(_TEST_ROOT, 'smtp-proofs'),
+            'TASKPE_TASK_ASSET_FOLDER': os.path.join(_TEST_ROOT, 'smtp-assets'),
+            'EMAIL_PROVIDER': 'smtp',
+        })
+        for key in ('EMAIL_SMTP_HOST', 'EMAIL_SMTP_USERNAME', 'EMAIL_SMTP_PASSWORD', 'EMAIL_FROM'):
+            env.pop(key, None)
+        result = subprocess.run(
+            [sys.executable, '-c', 'import app'], cwd=os.path.dirname(__file__),
+            env=env, capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('SMTP email provider configuration is incomplete', result.stderr)
+        self.assertNotIn('production-test-secret', result.stderr)
 
     def test_registration_requires_matching_single_use_nonexpired_verification(self):
         mobile_a = '919999999901'

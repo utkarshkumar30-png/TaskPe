@@ -18,6 +18,33 @@ from migrate_exact_money import migrate
 
 
 class ExactMoneyTests(unittest.TestCase):
+    @staticmethod
+    def _restore_legacy_money_columns(copy):
+        """Make only the disposable test copy exercise first-run conversion."""
+        columns = (
+            ('users', 'wallet_balance_paise'),
+            ('users', 'total_earned_paise'),
+            ('tasks', 'payout_paise'),
+            ('submissions', 'payout_paise'),
+            ('submissions', 'per_number_rate_paise'),
+            ('wallet_transactions', 'amount_paise'),
+            ('wallet_transactions', 'balance_after_paise'),
+            ('withdrawals', 'amount_paise'),
+            ('withdrawals', 'usdt_amount_micro'),
+            ('withdrawals', 'usdt_inr_rate_scaled'),
+            ('target_number_records', 'reward_per_number_paise'),
+            ('target_number_records', 'paid_amount_paise'),
+            ('target_payments', 'amount_paise'),
+            ('target_payments', 'rate_paise'),
+        )
+        conn = sqlite3.connect(copy)
+        try:
+            for table, column in columns:
+                conn.execute(f'UPDATE {table} SET {column} = NULL')
+            conn.commit()
+        finally:
+            conn.close()
+
     def test_inr_conversion_is_exact(self):
         self.assertEqual(inr_to_paise(Decimal('0.10')) + inr_to_paise(Decimal('0.20')), 30)
         self.assertEqual(paise_to_inr(30), Decimal('0.30'))
@@ -48,15 +75,20 @@ class ExactMoneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='taskpe-exact-money-') as directory:
             copy = Path(directory) / 'copy.db'
             shutil.copy2(source, copy)
+            self._restore_legacy_money_columns(copy)
             check = sqlite3.connect(copy)
-            before = check.execute('SELECT COUNT(*) FROM wallet_transactions').fetchone()[0]
-            check.close()
+            try:
+                before = check.execute('SELECT COUNT(*) FROM wallet_transactions').fetchone()[0]
+            finally:
+                check.close()
             report = migrate(str(copy))
             conn = sqlite3.connect(copy)
-            self.assertEqual(conn.execute('SELECT COUNT(*) FROM wallet_transactions').fetchone()[0], before)
-            self.assertEqual(conn.execute('SELECT wallet_balance_paise FROM users WHERE id=1').fetchone()[0], 2000)
-            self.assertTrue(any(row['table'] == 'users' and row['status'] == 'converted' for row in report))
-            conn.close()
+            try:
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM wallet_transactions').fetchone()[0], before)
+                self.assertEqual(conn.execute('SELECT wallet_balance_paise FROM users WHERE id=1').fetchone()[0], 2000)
+                self.assertTrue(any(row['table'] == 'users' and row['status'] == 'converted' for row in report))
+            finally:
+                conn.close()
 
     def test_migration_is_idempotent(self):
         source = Path(__file__).with_name('taskpe.db')
@@ -73,12 +105,16 @@ class ExactMoneyTests(unittest.TestCase):
             copy = Path(directory) / 'copy.db'
             shutil.copy2(source, copy)
             check = sqlite3.connect(copy)
-            before = check.execute("SELECT COUNT(*) FROM wallet_transactions WHERE reference_id='TASK-1'").fetchone()[0]
-            check.close()
+            try:
+                before = check.execute("SELECT COUNT(*) FROM wallet_transactions WHERE reference_id='TASK-1'").fetchone()[0]
+            finally:
+                check.close()
             migrate(str(copy))
             check = sqlite3.connect(copy)
-            after = check.execute("SELECT COUNT(*) FROM wallet_transactions WHERE reference_id='TASK-1'").fetchone()[0]
-            check.close()
+            try:
+                after = check.execute("SELECT COUNT(*) FROM wallet_transactions WHERE reference_id='TASK-1'").fetchone()[0]
+            finally:
+                check.close()
             self.assertEqual(before, 2)
             self.assertEqual(after, 2)
 

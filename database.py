@@ -2,9 +2,68 @@ import sqlite3
 import json
 import os
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from werkzeug.security import generate_password_hash, check_password_hash
+from money import inr_to_paise
 
-DB_PATH = os.environ.get('TASKPE_DB_PATH') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'taskpe.db')
+_IS_DEVELOPMENT = os.environ.get('ENVIRONMENT', 'production').strip().lower() == 'development'
+_configured_db_path = os.environ.get('TASKPE_DB_PATH', '').strip()
+if not _IS_DEVELOPMENT and not _configured_db_path:
+    raise RuntimeError('TASKPE_DB_PATH must be set to a persistent database path when ENVIRONMENT=production.')
+if _configured_db_path and not os.path.isabs(_configured_db_path):
+    raise RuntimeError('TASKPE_DB_PATH must be an absolute path.')
+DB_PATH = _configured_db_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'taskpe.db')
+
+REQUIRED_SCHEMA = {
+    'exact_money_settings': {'key', 'value_scaled', 'scale', 'kind', 'migrated_at'},
+    'users': {'id', 'name', 'mobile', 'email', 'password_hash', 'role', 'wallet_balance', 'total_earned', 'referral_code', 'referred_by', 'referred_user_task_count', 'signup_method', 'created_at', 'wallet_balance_paise', 'total_earned_paise'},
+    'tasks': {'id', 'title', 'category', 'task_type', 'description', 'payout', 'payout_paise', 'reward_per_number_paise', 'reward_source', 'template_text', 'image_path', 'destination_link', 'target_numbers', 'campaign_id', 'recipients_per_slot', 'time_limit_minutes', 'proof_instructions', 'total_slots', 'completed_slots', 'status', 'created_at'},
+    'task_assignments': {'id', 'user_id', 'task_id', 'campaign_id', 'campaign_type', 'assigned_numbers', 'status', 'assigned_at', 'started_at', 'expires_at', 'slot_released', 'completed_at'},
+    'target_number_records': {'id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'target_number', 'normalized_target_number', 'status', 'reward_per_number', 'reward_per_number_paise', 'verified_at', 'paid_at', 'paid_amount', 'paid_amount_paise', 'created_at', 'updated_at'},
+    'target_payments': {'id', 'target_number_record_id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'submission_id', 'target_number', 'normalized_target_number', 'amount', 'amount_paise', 'rate', 'rate_paise', 'payment_reference', 'paid_at'},
+    'admin_assignment_release_audit': {'id', 'assignment_id', 'admin_user_id', 'worker_user_id', 'task_id', 'old_status', 'new_status', 'reason', 'created_at'},
+    'recipient_allocations': {'id', 'campaign_id', 'phone_number', 'assignment_id', 'user_id', 'last_contacted_at', 'status'},
+    'submissions': {'id', 'user_id', 'task_id', 'assignment_id', 'proof_image', 'notes', 'status', 'admin_feedback', 'payout_amount', 'audit_badge', 'audit_score', 'numbers_detected', 'numbers_required', 'invalid_count', 'approved_valid_count', 'auto_approved', 'submitted_at', 'reviewed_at', 'required_count', 'verified_count', 'approval_threshold', 'per_number_rate', 'payout_paise', 'per_number_rate_paise'},
+    'task_proofs': {'id', 'submission_id', 'file_name', 'sort_order', 'created_at'},
+    'settings': {'key', 'value'},
+    'finance_settings_history': {'id', 'setting_name', 'old_value', 'new_value', 'changed_by', 'changed_at', 'unit', 'reason'},
+    'wallet_transactions': {'id', 'user_id', 'type', 'amount', 'balance_after', 'reference_id', 'description', 'created_at', 'submission_id', 'amount_paise', 'balance_after_paise'},
+    'withdrawals': {'id', 'user_id', 'amount', 'payout_method', 'upi_id', 'bank_account', 'bank_ifsc', 'bank_holder_name', 'status', 'utr_number', 'provider_reference', 'currency', 'usdt_amount', 'usdt_inr_rate', 'usdt_network', 'usdt_wallet_address', 'transaction_hash', 'failure_reason', 'requested_at', 'processed_at', 'amount_paise', 'usdt_amount_micro', 'usdt_inr_rate_scaled'},
+    'otps': {'id', 'mobile', 'otp_code', 'expires_at', 'created_at', 'otp_hash', 'attempt_count', 'last_attempt_at'},
+    'otp_request_log': {'id', 'mobile', 'created_at'},
+    'mobile_verifications': {'mobile', 'verified_at', 'expires_at', 'consumed_at'},
+    'password_reset_tokens': {'id', 'user_id', 'mobile', 'token_hash', 'expires_at', 'used_at', 'verified_at', 'created_at'},
+    'device_registrations': {'id', 'device_id_hash', 'signup_method', 'user_id', 'created_at'},
+    'email_verifications': {'id', 'email', 'token_hash', 'expires_at', 'used_at', 'created_at'},
+}
+
+REQUIRED_INDEXES = {
+    'one_active_campaign_per_user',
+    'target_number_records_assignment_status',
+    'target_number_records_normalized_lookup',
+    'target_payments_submission_lookup',
+    'one_target_payment_per_campaign_number',
+    'recipient_allocations_one_active',
+    'recipient_allocations_campaign_state',
+    'one_task_reward_per_submission',
+    'one_referral_commission_per_submission',
+    'one_withdrawal_refund_per_withdrawal',
+    'one_referral_reversal_per_submission',
+    'withdrawal_provider_reference_unique',
+    'withdrawal_transaction_hash_unique',
+    'finance_settings_history_setting_name',
+    'finance_settings_history_changed_at',
+    'finance_settings_history_changed_by',
+}
+
+REQUIRED_TRIGGERS = {
+    'paid_target_record_immutable_update',
+    'paid_target_record_immutable_delete',
+    'target_payments_immutable_update',
+    'target_payments_immutable_delete',
+    'finance_settings_history_no_update',
+    'finance_settings_history_no_delete',
+}
 
 def normalize_target_number(value):
     """Use the project's canonical phone normalization for target records."""
@@ -18,6 +77,65 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def verify_required_schema(conn=None):
+    """Verify the deployed schema without creating or changing anything."""
+    if conn is None and not os.path.isfile(DB_PATH):
+        raise RuntimeError(
+            f'Database does not exist at {DB_PATH}; initialize or migrate the '
+            'configured database before starting the application.'
+        )
+    owns_connection = conn is None
+    connection = conn or get_db_connection()
+    try:
+        actual_tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        missing_tables = sorted(set(REQUIRED_SCHEMA) - actual_tables)
+        missing_columns = []
+        for table, required_columns in REQUIRED_SCHEMA.items():
+            if table not in actual_tables:
+                continue
+            actual_columns = {
+                row[1] for row in connection.execute(f'PRAGMA table_info({table})')
+            }
+            for column in sorted(required_columns - actual_columns):
+                missing_columns.append(f'{table}.{column}')
+
+        actual_indexes = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL"
+            )
+        }
+        actual_triggers = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            )
+        }
+        missing_indexes = sorted(REQUIRED_INDEXES - actual_indexes)
+        missing_triggers = sorted(REQUIRED_TRIGGERS - actual_triggers)
+        problems = []
+        if missing_tables:
+            problems.append('tables: ' + ', '.join(missing_tables))
+        if missing_columns:
+            problems.append('columns: ' + ', '.join(missing_columns))
+        if missing_indexes:
+            problems.append('indexes: ' + ', '.join(missing_indexes))
+        if missing_triggers:
+            problems.append('triggers: ' + ', '.join(missing_triggers))
+        if problems:
+            raise RuntimeError(
+                'Database schema is incomplete; run the documented explicit '
+                'initialization/migrations before starting the application. Missing '
+                + '; '.join(problems)
+            )
+        return True
+    finally:
+        if owns_connection:
+            connection.close()
 
 
 def withdrawal_identifier_collisions(conn):
@@ -87,34 +205,124 @@ def ensure_finance_settings_history(conn):
             FOREIGN KEY (changed_by) REFERENCES users(id)
         )
     ''')
-    conn.execute('''
-        CREATE INDEX IF NOT EXISTS finance_settings_history_setting_name
-        ON finance_settings_history(setting_name)
-    ''')
-    conn.execute('''
-        CREATE INDEX IF NOT EXISTS finance_settings_history_changed_at
-        ON finance_settings_history(changed_at)
-    ''')
-    conn.execute('''
-        CREATE INDEX IF NOT EXISTS finance_settings_history_changed_by
-        ON finance_settings_history(changed_by)
-    ''')
+    conn.execute('''CREATE INDEX IF NOT EXISTS finance_settings_history_setting_name ON finance_settings_history(setting_name)''')
+    conn.execute('''CREATE INDEX IF NOT EXISTS finance_settings_history_changed_at ON finance_settings_history(changed_at)''')
+    conn.execute('''CREATE INDEX IF NOT EXISTS finance_settings_history_changed_by ON finance_settings_history(changed_by)''')
     conn.execute('''
         CREATE TRIGGER IF NOT EXISTS finance_settings_history_no_update
-        BEFORE UPDATE ON finance_settings_history
-        BEGIN
+        BEFORE UPDATE ON finance_settings_history BEGIN
             SELECT RAISE(ABORT, 'finance settings history is immutable');
         END
     ''')
     conn.execute('''
         CREATE TRIGGER IF NOT EXISTS finance_settings_history_no_delete
-        BEFORE DELETE ON finance_settings_history
-        BEGIN
+        BEFORE DELETE ON finance_settings_history BEGIN
             SELECT RAISE(ABORT, 'finance settings history is immutable');
         END
     ''')
 
-def init_db():
+
+def ensure_task_type_and_reward_fields(conn):
+    """Add task content/reward snapshots without rewriting financial history."""
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)')}
+    additions = {
+        'task_type': 'TEXT',
+        'image_path': 'TEXT',
+        'destination_link': 'TEXT',
+        'reward_per_number_paise': 'INTEGER',
+        'reward_source': "TEXT DEFAULT 'legacy_snapshot'",
+    }
+    for column, definition in additions.items():
+        if column not in columns:
+            conn.execute(f'ALTER TABLE tasks ADD COLUMN {column} {definition}')
+
+    rate_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'per_message_rate'"
+    ).fetchone()
+    try:
+        default_rate_paise = inr_to_paise(rate_row[0]) if rate_row else 300
+    except (TypeError, ValueError, ArithmeticError):
+        default_rate_paise = 300
+
+    rows = conn.execute('''
+        SELECT id, category, payout, payout_paise, recipients_per_slot,
+               task_type, reward_per_number_paise, reward_source
+        FROM tasks
+    ''').fetchall()
+    for row in rows:
+        task_type = row['task_type'] or (
+            'IMAGE_TEXT_LINK' if row['category'] == 'IMAGE_TEXT_LINK' else 'TEXT_LINK'
+        )
+        reward_paise = row['reward_per_number_paise']
+        if reward_paise is None:
+            count = int(row['recipients_per_slot'] or 0)
+            if row['payout_paise'] is not None and count > 0:
+                reward_paise = int(row['payout_paise']) // count
+            elif row['payout'] is not None and count > 0:
+                reward_paise = int(
+                    (Decimal(str(row['payout'])) * 100 / count)
+                    .quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+                )
+            else:
+                reward_paise = default_rate_paise
+        conn.execute('''
+            UPDATE tasks
+            SET task_type = COALESCE(task_type, ?),
+                reward_per_number_paise = COALESCE(reward_per_number_paise, ?),
+                reward_source = COALESCE(reward_source, 'legacy_snapshot')
+            WHERE id = ?
+        ''', (task_type, reward_paise, row['id']))
+
+def ensure_recipient_allocation_history(conn):
+    """Make recipient allocations append-only events with reusable releases."""
+    table = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='recipient_allocations'").fetchone()
+    if table:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(recipient_allocations)')}
+        has_legacy_unique = 'UNIQUE(CAMPAIGN_ID,PHONE_NUMBER)' in (table[0] or '').replace(' ', '').upper()
+        if 'status' not in columns or has_legacy_unique:
+            conn.execute('ALTER TABLE recipient_allocations RENAME TO recipient_allocations_legacy')
+            conn.execute('''
+                CREATE TABLE recipient_allocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id INTEGER NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    assignment_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    last_contacted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'ALLOCATED'
+                        CHECK (status IN ('ALLOCATED', 'COMPLETED', 'RELEASED')),
+                    FOREIGN KEY (assignment_id) REFERENCES task_assignments(id),
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO recipient_allocations
+                    (id, campaign_id, phone_number, assignment_id, user_id, last_contacted_at, status)
+                SELECT id, campaign_id, phone_number, assignment_id, user_id, last_contacted_at, 'ALLOCATED'
+                FROM recipient_allocations_legacy
+            ''')
+            conn.execute('DROP TABLE recipient_allocations_legacy')
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS recipient_allocations_one_active
+        ON recipient_allocations(campaign_id, phone_number)
+        WHERE status = 'ALLOCATED'
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS recipient_allocations_campaign_state
+        ON recipient_allocations(campaign_id, phone_number, status)
+    ''')
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='submissions'").fetchone():
+        conn.execute('''
+            UPDATE recipient_allocations
+            SET status = 'RELEASED'
+            WHERE status = 'ALLOCATED'
+              AND assignment_id IN (
+                  SELECT ta.id FROM task_assignments ta
+                  WHERE ta.status IN ('expired', 'cancelled')
+                    AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.assignment_id = ta.id)
+              )
+        ''')
+def initialize_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -158,6 +366,8 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN wallet_balance_paise INTEGER")
     if 'total_earned_paise' not in user_cols:
         cursor.execute("ALTER TABLE users ADD COLUMN total_earned_paise INTEGER")
+    if 'signup_method' not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN signup_method TEXT")
 
     # Tasks Table
     cursor.execute('''
@@ -165,9 +375,14 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT 'Direct Message',
+            task_type TEXT NOT NULL DEFAULT 'TEXT_LINK',
             description TEXT NOT NULL,
             payout REAL NOT NULL,
+            reward_per_number_paise INTEGER,
+            reward_source TEXT NOT NULL DEFAULT 'legacy_snapshot',
             template_text TEXT NOT NULL,
+            image_path TEXT,
+            destination_link TEXT,
             target_numbers TEXT NOT NULL,
             campaign_id INTEGER,
             recipients_per_slot INTEGER NOT NULL DEFAULT 0,
@@ -384,7 +599,8 @@ def init_db():
             assignment_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             last_contacted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(campaign_id, phone_number),
+            status TEXT NOT NULL DEFAULT 'ALLOCATED'
+                CHECK (status IN ('ALLOCATED', 'COMPLETED', 'RELEASED')),
             FOREIGN KEY (assignment_id) REFERENCES task_assignments(id),
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
@@ -393,6 +609,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS recipient_cooldown_lookup
         ON recipient_allocations(phone_number, last_contacted_at)
     ''')
+    ensure_recipient_allocation_history(conn)
 
     cursor.execute("PRAGMA table_info(tasks)")
     task_cols = [c[1] for c in cursor.fetchall()]
@@ -652,12 +869,58 @@ def init_db():
             consumed_at DATETIME
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mobile TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME,
+            verified_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS password_reset_tokens_mobile_idx ON password_reset_tokens(mobile)')
+    cursor.execute("PRAGMA table_info(password_reset_tokens)")
+    if 'verified_at' not in [column[1] for column in cursor.fetchall()]:
+        cursor.execute('ALTER TABLE password_reset_tokens ADD COLUMN verified_at DATETIME')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS device_registrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id_hash TEXT NOT NULL,
+            signup_method TEXT NOT NULL CHECK (signup_method IN ('MOBILE', 'EMAIL')),
+            user_id INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS device_registrations_device_idx ON device_registrations(device_id_hash)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS device_registrations_method_idx ON device_registrations(signup_method)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS device_registrations_created_idx ON device_registrations(created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS device_registrations_user_idx ON device_registrations(user_id)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS email_verifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS email_verifications_email_idx ON email_verifications(email)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS email_verifications_expires_idx ON email_verifications(expires_at)')
 
     conn.commit()
     if is_development_environment():
         seed_data(conn)
     else:
         provision_initial_admin(conn)
+    ensure_task_type_and_reward_fields(conn)
+    conn.commit()
     conn.close()
 
 def provision_initial_admin(conn):
@@ -856,6 +1119,11 @@ def seed_data(conn):
 
     conn.commit()
 
+def init_db():
+    """Backward-compatible alias for explicit initialization callers."""
+    return initialize_database()
+
+
 if __name__ == '__main__':
-    init_db()
+    initialize_database()
     print("Database initialized, migrated, and seeded successfully.")

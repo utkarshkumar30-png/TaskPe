@@ -32,6 +32,7 @@ taskpe_staging.db
 
 # Uploaded proof files
 uploads/proofs/
+uploads/task-assets/
 test_ocr.png
 
 # Logs and local runtime files

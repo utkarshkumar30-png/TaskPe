@@ -15,8 +15,13 @@ import app as app_module
 
 class AdminTaskManagementTests(unittest.TestCase):
     def setUp(self):
+        os.environ['ENVIRONMENT'] = 'production'
+        os.environ['SECRET_KEY'] = 'admin-task-test-secret'
+        os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(ROOT, 'proofs')
+        os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(ROOT, 'assets')
         if os.path.exists(database.DB_PATH):
             os.remove(database.DB_PATH)
+        database.initialize_database()
         self.app_module = importlib.reload(app_module)
         self.app_module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
         self.client = self.app_module.app.test_client()

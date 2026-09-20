@@ -14,6 +14,11 @@ hashes.
 
 ## Backup
 
+Production application startup verifies schema only. It does not implicitly
+run migrations or repair financial/assignment history. Initialize a fresh
+database or run a migration explicitly, validate it, and start the service
+only after the checks pass.
+
 Stop the WSGI service and expiry job before copying SQLite. Then copy both the
 database selected by `TASKPE_DB_PATH` (or `taskpe.db` when unset) and the whole
 `uploads/proofs` directory. Record the database hash and file count/hash list.

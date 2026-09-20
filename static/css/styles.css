@@ -149,7 +149,8 @@ button, a { touch-action: manipulation; }
   #view-task-detail h1 { font-size: 1.45rem; line-height: 1.25; }
   #task-timer-display { position: sticky; top: 4.25rem; z-index: 10; font-size: 1rem; }
   #detail-numbers-list { max-height: none; grid-template-columns: minmax(0, 1fr); }
-  #detail-numbers-list > div { padding: .75rem; }
+  #detail-numbers-list > div { padding: .75rem; flex-wrap: wrap; row-gap: .5rem; }
+  #detail-numbers-list > div > div:last-child { margin-left: auto; }
   #detail-numbers-list a, #detail-numbers-list button { min-height: 44px; }
   #proof-dropzone { min-height: 170px; padding: 1.25rem; display: flex; align-items: center; justify-content: center; }
   #submit-proof-btn { min-height: 52px; position: sticky; bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + .5rem); z-index: 15; }

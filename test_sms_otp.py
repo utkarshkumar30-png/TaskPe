@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import logging
 from unittest.mock import MagicMock, patch
 
 _ROOT = tempfile.mkdtemp(prefix='taskpe-sms-tests-')
@@ -27,6 +29,10 @@ class Fast2SmsOtpTests(unittest.TestCase):
         os.environ['ENVIRONMENT'] = 'development'
         os.environ['SECRET_KEY'] = 'test-only-development-secret'
         os.environ['SMS_PROVIDER'] = 'disabled'
+        os.environ['FAST2SMS_ENABLED'] = '0'
+        os.environ['FAST2SMS_ROUTE'] = 'q'
+        os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(_ROOT, 'proofs')
+        os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(_ROOT, 'assets')
         os.environ.pop('FAST2SMS_API_KEY', None)
         self._reload_app()
 
@@ -46,6 +52,12 @@ class Fast2SmsOtpTests(unittest.TestCase):
         conn.close()
         return count
 
+    def _request_log_count(self, mobile):
+        conn = database.get_db_connection()
+        count = conn.execute('SELECT COUNT(*) FROM otp_request_log WHERE mobile=?', (mobile,)).fetchone()[0]
+        conn.close()
+        return count
+
     def test_development_returns_stored_otp_and_rate_limits_resends(self):
         first = self.client.post('/api/auth/send-otp', json={'mobile': '9876543210'})
         self.assertEqual(first.status_code, 200)
@@ -54,10 +66,25 @@ class Fast2SmsOtpTests(unittest.TestCase):
         self.assertEqual(self._otp_count('9876543210'), 1)
         self.assertEqual(self.client.post('/api/auth/send-otp', json={'mobile': '9876543210'}).status_code, 429)
 
+    def test_otp_uses_secure_generator_and_preserves_leading_zeroes(self):
+        with patch.object(app_module.secrets, 'randbelow', return_value=12345) as generator:
+            response = self.client.post('/api/auth/send-otp', json={'mobile': '9876543220'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['otp_code'], '012345')
+        generator.assert_called_once_with(1_000_000)
+        self.assertEqual(
+            self.client.post('/api/auth/verify-otp', json={
+                'mobile': '9876543220', 'otp_code': '012345'
+            }).status_code,
+            200,
+        )
+
     def test_enabled_fast2sms_sends_through_mock_and_production_hides_otp(self):
         os.environ['ENVIRONMENT'] = 'production'
         os.environ['SECRET_KEY'] = 'production-test-secret'
         os.environ['SMS_PROVIDER'] = 'fast2sms'
+        os.environ['FAST2SMS_ENABLED'] = '1'
+        os.environ['FAST2SMS_ROUTE'] = 'q'
         os.environ['FAST2SMS_API_KEY'] = 'test-api-key'
         self._reload_app()
         response = MagicMock()
@@ -74,9 +101,10 @@ class Fast2SmsOtpTests(unittest.TestCase):
         self.assertEqual(request_obj.get_header('Authorization'), 'test-api-key')
         self.assertEqual(request_obj.get_header('Content-type'), 'application/json')
         body = json.loads(request_obj.data.decode())
-        self.assertEqual(body['route'], 'otp')
+        self.assertEqual(body['route'], 'q')
         self.assertEqual(body['numbers'], '9876543211')
-        self.assertRegex(body['variables_values'], r'^\d{6}$')
+        self.assertRegex(body['message'], r'TaskPe verification code: \d{6}\. This code expires in 10 minutes\.')
+        self.assertNotIn('variables_values', body)
         self.assertNotIn('otp_id', body)
         self.assertNotIn('template_id', body)
         self.assertNotIn('otp_expiry', body)
@@ -86,10 +114,13 @@ class Fast2SmsOtpTests(unittest.TestCase):
 
     def test_fast2sms_failure_or_missing_configuration_does_not_store_otp(self):
         os.environ['SMS_PROVIDER'] = 'fast2sms'
+        os.environ['FAST2SMS_ENABLED'] = '1'
+        os.environ['FAST2SMS_ROUTE'] = 'q'
         self._reload_app()
         missing = self.client.post('/api/auth/send-otp', json={'mobile': '9876543212'})
         self.assertEqual(missing.status_code, 502)
         self.assertEqual(self._otp_count('9876543212'), 0)
+        self.assertEqual(self._request_log_count('9876543212'), 1)
 
         os.environ['FAST2SMS_API_KEY'] = 'test-api-key'
         self._reload_app()
@@ -97,12 +128,61 @@ class Fast2SmsOtpTests(unittest.TestCase):
             failed = self.client.post('/api/auth/send-otp', json={'mobile': '9876543213'})
         self.assertEqual(failed.status_code, 502)
         self.assertEqual(self._otp_count('9876543213'), 0)
+        self.assertEqual(self.client.post('/api/auth/send-otp', json={'mobile': '9876543213'}).status_code, 502)
+
+    def test_fast2sms_provider_errors_are_safe_and_redacted(self):
+        os.environ['ENVIRONMENT'] = 'production'
+        os.environ['SECRET_KEY'] = 'production-test-secret'
+        os.environ['SMS_PROVIDER'] = 'fast2sms'
+        os.environ['FAST2SMS_ENABLED'] = '1'
+        os.environ['FAST2SMS_ROUTE'] = 'q'
+        os.environ['FAST2SMS_API_KEY'] = 'test-api-key'
+        self._reload_app()
+        error_body = b'{"message":"invalid authorization test-api-key otp 123456 mobile 9876543219"}'
+        captured = []
+        handler = logging.Handler()
+        handler.emit = lambda record: captured.append(record.getMessage())
+        app_logger = logging.getLogger('app')
+        app_logger.addHandler(handler)
+        try:
+            for status in (400, 401, 412, 413, 416, 500, 503):
+                error = app_module.urllib.error.HTTPError(
+                    'https://www.fast2sms.com/dev/bulkV2', status, 'provider error', {}, io.BytesIO(error_body)
+                )
+                with patch.object(app_module.urllib.request, 'urlopen', side_effect=error):
+                    self.assertEqual(app_module.send_fast2sms_otp('9876543219', '123456'), app_module.FAST2SMS_PROVIDER_ERROR)
+            with patch.object(app_module.urllib.request, 'urlopen', side_effect=TimeoutError('request timed out')):
+                self.assertEqual(app_module.send_fast2sms_otp('9876543219', '123456'), app_module.FAST2SMS_NETWORK_ERROR)
+        finally:
+            app_logger.removeHandler(handler)
+        diagnostics = '\n'.join(captured)
+        self.assertIn('status=401', diagnostics)
+        self.assertIn('reached=False', diagnostics)
+        self.assertIn('message=request timed out', diagnostics)
+        self.assertNotIn('test-api-key', diagnostics)
+        self.assertNotIn('123456', diagnostics)
+        self.assertNotIn('9876543219', diagnostics)
+
+    def test_provider_failure_counts_hourly_limit_without_cooldown_lock(self):
+        os.environ['SMS_PROVIDER'] = 'fast2sms'
+        os.environ['FAST2SMS_ENABLED'] = '1'
+        os.environ['FAST2SMS_API_KEY'] = 'test-api-key'
+        self._reload_app()
+        with patch.object(app_module.urllib.request, 'urlopen', side_effect=app_module.urllib.error.URLError('offline')):
+            for _ in range(app_module.OTP_MAX_REQUESTS_PER_HOUR):
+                response = self.client.post('/api/auth/send-otp', json={'mobile': '9876543222'})
+                self.assertEqual(response.status_code, 502)
+            limited = self.client.post('/api/auth/send-otp', json={'mobile': '9876543222'})
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(self._otp_count('9876543222'), 0)
 
     def test_production_fast2sms_requires_complete_configuration(self):
         env = os.environ.copy()
         env['ENVIRONMENT'] = 'production'
         env['SECRET_KEY'] = 'production-test-secret'
         env['SMS_PROVIDER'] = 'fast2sms'
+        env['FAST2SMS_ENABLED'] = '1'
+        env['FAST2SMS_ROUTE'] = 'q'
         env.pop('FAST2SMS_API_KEY', None)
         env.pop('FAST2SMS_API_KEY', None)
         env['TASKPE_DB_PATH'] = os.path.join(_ROOT, 'missing-fast2sms-config.db')

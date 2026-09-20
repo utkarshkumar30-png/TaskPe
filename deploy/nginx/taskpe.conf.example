@@ -1,6 +1,10 @@
 # TaskPe Windows reverse-proxy template.
+# Intended topology: Internet -> HTTPS reverse proxy -> 127.0.0.1:5000
+# -> Waitress -> TaskPe. This file is not an HTTPS deployment.
 # Copy this file to a host-local Nginx configuration, replace the placeholders,
 # and keep the resulting file and private key outside source control.
+# Set TRUSTED_PROXY_HOPS=1 only when this is the single trusted local proxy
+# directly in front of Waitress. Leave it at 0 for direct/private access.
 
 upstream taskpe_waitress {
     server 127.0.0.1:5000;
@@ -16,6 +20,9 @@ server {
 server {
     listen 443 ssl;
     server_name REPLACE_WITH_PUBLIC_HOSTNAME;
+
+    # Keep this aligned with Flask's 16 MB application upload limit.
+    client_max_body_size 16m;
 
     # Configure these in the host-local copy only. Never commit certificate
     # paths containing private keys or certificates to the repository.

@@ -85,6 +85,19 @@ exactly one local proxy hop for the original HTTPS scheme and host. Set
 HSTS is emitted only for requests that Flask recognizes as secure. With no
 trusted proxy, leave `TRUSTED_PROXY_HOPS=0` and `ENABLE_HSTS=0`.
 
+Production application startup verifies the required database schema but does
+not silently run migrations, financial backfills, withdrawal repairs, or demo
+seeding. If a fresh database is needed, initialize it explicitly after backup
+and review:
+
+```powershell
+.venv\Scripts\python.exe initialize_database.py --db <fresh-database>
+```
+
+Run explicit migrations and validation before starting Waitress. Development
+seeding remains restricted to `ENVIRONMENT=development`; production startup
+fails safely when required schema elements are missing.
+
 Production requires `ENVIRONMENT=production`, a strong `SECRET_KEY`, complete
 Fast2SMS settings when enabled, and `PAYOUT_MODE=MANUAL`. Never commit `.env`,
 TLS private keys, certificates, or real credentials.
@@ -101,11 +114,13 @@ TaskPe keeps OTP verification server-side. To deliver real Indian SMS OTPs, set 
 ENVIRONMENT=production
 SECRET_KEY=<configured-securely-in-the-deployment-environment>
 SMS_PROVIDER=fast2sms
+FAST2SMS_ENABLED=1
 FAST2SMS_API_KEY=<configured-securely-in-the-deployment-environment>
+FAST2SMS_ROUTE=q
 PAYOUT_MODE=MANUAL
 ```
 
-Configure Fast2SMS OTP SMS access and any required account/DLT approvals in the Fast2SMS dashboard. TaskPe sends its server-generated six-digit OTP as `variables_values`, with `route=otp` and the normalized ten-digit Indian mobile number to `https://www.fast2sms.com/dev/bulkV2` using the `Authorization` header. Never commit the API key to source control. When `SMS_PROVIDER=fast2sms`, production startup requires `FAST2SMS_API_KEY`. Provider failures return a safe error and do not create a usable OTP record. Fast2SMS account KYC, wallet, sender/template approval, and DLT setup may be required by the provider.
+Configure Fast2SMS Quick SMS access in the Fast2SMS dashboard. TaskPe generates and validates the server-side six-digit OTP and uses Fast2SMS only for delivery. OTP requests use `route=q`, the `message` field, and the normalized ten-digit Indian mobile number at `https://www.fast2sms.com/dev/bulkV2` using the `Authorization` header. Never commit the API key to source control. When `SMS_PROVIDER=fast2sms` and `FAST2SMS_ENABLED=1`, production startup requires `FAST2SMS_API_KEY`; `FAST2SMS_ROUTE` must remain `q`. Provider failures return a safe error and do not create a usable OTP record.
 
 With `ENVIRONMENT=development` and `SMS_PROVIDER=disabled` (the default), TaskPe does not send SMS and returns the generated OTP only for local testing. Production never returns OTP values to the browser. OTP requests have a 60-second server-side resend cooldown and are capped at five requests per mobile per hour; verification is limited to five failed attempts per issued OTP. OTPs expire after 10 minutes, are mobile-bound, and are single-use. In production, set `SMS_PROVIDER=fast2sms` with valid credentials or requests fail safely.
 

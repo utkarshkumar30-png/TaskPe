@@ -12,6 +12,10 @@ from unittest.mock import patch
 
 os.environ.setdefault('ENVIRONMENT', 'production')
 os.environ.setdefault('SECRET_KEY', 'pass3-test-secret-not-for-production')
+_IMPORT_ROOT = tempfile.mkdtemp(prefix='taskpe-pass3-import-')
+os.environ.setdefault('TASKPE_DB_PATH', os.path.join(_IMPORT_ROOT, 'taskpe.db'))
+os.environ.setdefault('TASKPE_UPLOAD_FOLDER', os.path.join(_IMPORT_ROOT, 'proofs'))
+os.environ.setdefault('TASKPE_TASK_ASSET_FOLDER', os.path.join(_IMPORT_ROOT, 'assets'))
 
 import database
 import app as app_module
@@ -26,6 +30,8 @@ class Pass3RouteTests(unittest.TestCase):
         self.old_secret = os.environ.get('SECRET_KEY')
         os.environ['ENVIRONMENT'] = 'production'
         os.environ['SECRET_KEY'] = 'pass3-test-secret-not-for-production'
+        os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(self.tempdir, 'proofs')
+        os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(self.tempdir, 'assets')
         database.DB_PATH = os.path.join(self.tempdir, 'taskpe-test.db')
         database.init_db()
         global app_module

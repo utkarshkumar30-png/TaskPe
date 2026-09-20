@@ -437,6 +437,25 @@
               <i class="fa-regular fa-copy"></i> <span id="copy-btn-label">Copy Template</span>
             </button>
           </div>
+          <div id="detail-campaign-asset" class="hidden mb-4 bg-slate-950 rounded-2xl p-4 border border-slate-800">
+            <a id="detail-image-view" class="hidden" target="_blank" rel="noopener noreferrer" aria-label="View campaign image">
+              <img id="detail-task-image" class="hidden max-h-72 w-full object-contain rounded-xl" alt="Campaign image">
+            </a>
+            <a id="detail-image-download" class="hidden mt-3 min-h-11 w-full items-center justify-center rounded-xl bg-emerald-500 px-4 py-3 text-sm font-bold text-slate-950" download="taskpe-campaign-image">Download Image</a>
+            <div id="detail-image-workflow" class="hidden mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              <p class="font-bold">Image + Text + Link workflow</p>
+              <ol class="mt-2 list-decimal space-y-1 pl-4">
+                <li>View the campaign image.</li>
+                <li>Copy the message.</li>
+                <li>Open WhatsApp.</li>
+                <li>Attach the campaign image manually.</li>
+                <li>Send the message.</li>
+                <li>Continue to the next recipient.</li>
+              </ol>
+              <p class="mt-2 font-bold">Attach the campaign image before sending.</p>
+            </div>
+            <a id="detail-destination-link" class="hidden mt-3 min-h-11 inline-flex items-center rounded-xl bg-sky-500/20 px-4 py-2 text-sm font-bold text-sky-300" target="_blank" rel="noopener noreferrer">Open destination link</a>
+          </div>
           <div class="relative bg-slate-950 rounded-2xl p-4 border border-slate-800 text-sm text-slate-200 font-mono">
             <p id="detail-template-text" class="whitespace-pre-wrap leading-relaxed">Template message...</p>
           </div>
@@ -937,15 +956,37 @@
         </div>
         <div>
           <label for="login-password" class="block text-xs font-medium text-slate-300 mb-1">Password</label>
-          <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+          <div class="relative"><input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-4 pr-12 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"><button type="button" class="password-toggle absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 text-slate-400 hover:text-white" aria-label="Show password" onclick="togglePasswordVisibility('login-password', this)"><i class="fa-solid fa-eye"></i></button></div>
         </div>
         <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
           Log In to TaskPe
         </button>
+        <button type="button" onclick="openForgotPassword()" class="w-full text-center text-xs font-semibold text-slate-400 hover:text-emerald-400 py-2">Forgot Password?</button>
+      </form>
+
+      <form id="form-forgot-password" onsubmit="handleForgotPasswordSubmit(event)" class="space-y-4 hidden">
+        <div><h3 class="text-lg font-bold text-white">Reset your password</h3><p class="text-xs text-slate-400 mt-1">Enter your registered mobile number to receive an OTP.</p></div>
+        <input type="tel" id="reset-mobile" inputmode="numeric" autocomplete="tel-national" maxlength="10" placeholder="9876543210" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500">
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 text-slate-950 font-bold text-sm">Send OTP</button>
+        <button type="button" onclick="switchAuthTab('login')" class="w-full text-xs text-slate-400 hover:text-white py-2">Back to Login</button>
+      </form>
+
+      <form id="form-reset-password" onsubmit="handleResetPasswordSubmit(event)" class="space-y-4 hidden">
+        <div><h3 id="reset-form-title" class="text-lg font-bold text-white">Verify OTP</h3><p id="reset-form-help" class="text-xs text-slate-400 mt-1">Enter the OTP sent to your mobile.</p></div>
+        <input type="text" id="reset-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit OTP" required class="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-4 py-3 text-sm font-mono text-white focus:outline-none focus:border-amber-400">
+        <div id="reset-password-fields" class="hidden space-y-4">
+          <div class="relative"><input type="password" id="reset-new-password" autocomplete="new-password" placeholder="New password" minlength="8" class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-4 pr-12 py-3 text-sm text-white"><button type="button" class="password-toggle absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 text-slate-400" aria-label="Show password" onclick="togglePasswordVisibility('reset-new-password', this)"><i class="fa-solid fa-eye"></i></button></div>
+          <div class="relative"><input type="password" id="reset-confirm-password" autocomplete="new-password" placeholder="Confirm password" minlength="8" class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-4 pr-12 py-3 text-sm text-white"><button type="button" class="password-toggle absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 text-slate-400" aria-label="Show password" onclick="togglePasswordVisibility('reset-confirm-password', this)"><i class="fa-solid fa-eye"></i></button></div>
+        </div>
+        <button id="reset-submit-button" type="submit" class="w-full py-3 rounded-xl bg-emerald-500 text-slate-950 font-bold text-sm">Verify OTP</button>
       </form>
 
       <!-- SIGNUP FORM -->
       <form id="form-signup" onsubmit="handleSignupSubmit(event)" class="space-y-3.5 hidden">
+        <div class="grid grid-cols-2 gap-2 mb-2">
+          <button type="button" id="signup-method-mobile" onclick="switchSignupMethod('mobile')" class="py-2 rounded-xl bg-emerald-500 text-slate-950 text-xs font-bold">🇮🇳 Sign up with Mobile</button>
+          <button type="button" id="signup-method-email" onclick="switchSignupMethod('email')" class="py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold">✉️ Sign up with Email</button>
+        </div>
         <div>
           <label for="signup-name" class="block text-xs font-medium text-slate-300 mb-1">Full Name</label>
           <input type="text" id="signup-name" placeholder="Rohan Sharma" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
@@ -972,7 +1013,7 @@
         </div>
         <div>
           <label for="signup-password" class="block text-xs font-medium text-slate-300 mb-1">Create Password</label>
-          <input type="password" id="signup-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+          <div class="relative"><input type="password" id="signup-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-4 pr-12 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"><button type="button" class="password-toggle absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 text-slate-400" aria-label="Show password" onclick="togglePasswordVisibility('signup-password', this)"><i class="fa-solid fa-eye"></i></button></div>
         </div>
         <div>
           <label for="signup-referral" class="block text-xs font-medium text-slate-300 mb-1">Referral Code (Optional)</label>
@@ -981,6 +1022,19 @@
         <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg glow-wa transition">
           Create Account & Claim ₹20
         </button>
+      </form>
+
+      <form id="form-signup-email" onsubmit="handleEmailSignupSubmit(event)" class="space-y-3.5 hidden">
+        <div class="grid grid-cols-2 gap-2 mb-2">
+          <button type="button" onclick="switchSignupMethod('mobile')" class="py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold">🇮🇳 Sign up with Mobile</button>
+          <button type="button" class="py-2 rounded-xl bg-emerald-500 text-slate-950 text-xs font-bold">✉️ Sign up with Email</button>
+        </div>
+        <div><label for="email-signup-name" class="block text-xs font-medium text-slate-300 mb-1">Full Name</label><input type="text" id="email-signup-name" placeholder="Rohan Sharma" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"></div>
+        <div><label for="email-signup-email" class="block text-xs font-medium text-slate-300 mb-1">Email Address</label><input type="email" id="email-signup-email" placeholder="user@gmail.com" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"></div>
+        <div><label for="email-signup-password" class="block text-xs font-medium text-slate-300 mb-1">Create Password</label><div class="relative"><input type="password" id="email-signup-password" minlength="8" autocomplete="new-password" placeholder="••••••••" required class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-4 pr-12 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"><button type="button" class="password-toggle absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 text-slate-400" aria-label="Show password" onclick="togglePasswordVisibility('email-signup-password', this)"><i class="fa-solid fa-eye"></i></button></div></div>
+        <div><label for="email-signup-referral" class="block text-xs font-medium text-slate-300 mb-1">Referral Code (Optional)</label><input type="text" id="email-signup-referral" placeholder="Ex: ROHAN100" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"></div>
+        <div class="flex gap-2"><input type="text" id="email-signup-token" placeholder="Email verification token" class="flex-1 bg-slate-950 border border-amber-500/50 rounded-xl px-4 py-2 text-sm font-mono text-white"><button type="button" onclick="sendEmailVerification()" class="px-3 py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200">Send verification</button></div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm">Create Account & Claim ₹20</button>
       </form>
 
     </div>
@@ -1102,12 +1156,28 @@
               <option value="Broadcast">Broadcast</option>
               <option value="App Invite">App Invite</option>
               <option value="Status Share">Status Share</option>
+              <option value="IMAGE_TEXT_LINK">Image + Text + Link</option>
             </select>
           </div>
           <div>
             <label for="newtask-payout" class="block text-xs font-medium text-slate-300 mb-1">Payout per earner (server-calculated)</label>
             <input type="number" id="newtask-payout" readonly value="0" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-400">
           </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <label for="newtask-reward" class="block text-xs font-medium text-slate-300 mb-1">Reward / verified number
+            <input type="number" id="newtask-reward" min="0.01" step="0.01" placeholder="Uses current default" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white">
+          </label>
+          <label class="flex items-center gap-2 text-xs text-slate-300 mt-6"><input type="checkbox" id="newtask-use-default" checked> Use current default reward</label>
+        </div>
+        <div id="newtask-image-fields" class="hidden space-y-3">
+          <label for="newtask-image" class="block text-xs font-medium text-slate-300">Campaign image
+            <input type="file" id="newtask-image" accept="image/png,image/jpeg,image/webp,image/gif" class="mt-1 block w-full text-sm text-slate-300">
+          </label>
+          <label for="newtask-link" class="block text-xs font-medium text-slate-300">Destination link
+            <input type="url" id="newtask-link" placeholder="https://example.com" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white">
+          </label>
         </div>
 
         <div>
