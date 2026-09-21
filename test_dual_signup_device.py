@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import shutil
 import tempfile
@@ -68,26 +69,49 @@ class DualSignupDeviceTests(unittest.TestCase):
         self.assertIsInstance(app_module.email_provider, app_module.DisabledEmailProvider)
         self.assertTrue(app_module.send_email_verification('disabled@example.test', 'test-token'))
 
-    def test_smtp_email_provider_invokes_mock_transport(self):
-        provider = app_module.SmtpEmailProvider()
-        fake_server = MagicMock()
-        fake_server.__enter__.return_value = fake_server
-        with patch.object(app_module, 'EMAIL_SMTP_HOST', 'smtp.example.test'), \
-             patch.object(app_module, 'EMAIL_SMTP_PORT', 587), \
-             patch.object(app_module, 'EMAIL_SMTP_USERNAME', 'user'), \
-             patch.object(app_module, 'EMAIL_SMTP_PASSWORD', 'password'), \
-             patch.object(app_module, 'EMAIL_FROM', 'no-reply@example.test'), \
-             patch.object(app_module.smtplib, 'SMTP', return_value=fake_server) as smtp:
+    def test_brevo_email_provider_invokes_https_transport(self):
+        provider = app_module.BrevoEmailProvider()
+        response = MagicMock(status=201)
+        response.getcode.return_value = 201
+        response.read.return_value = b'{"messageId":"brevo-message-id"}'
+        response.__enter__.return_value = response
+        with patch.object(app_module, 'BREVO_API_KEY', 'test-brevo-key'), \
+             patch.object(app_module, 'EMAIL_FROM', 'support@example.test'), \
+             patch.object(app_module, 'EMAIL_FROM_NAME', 'TaskPe'), \
+             patch.object(app_module.urllib.request, 'urlopen', return_value=response) as urlopen:
             self.assertTrue(provider.send_verification('recipient@example.test', 'token-value'))
-        smtp.assert_called_once_with('smtp.example.test', 587, timeout=10)
-        fake_server.starttls.assert_called_once_with()
-        fake_server.login.assert_called_once_with('user', 'password')
-        fake_server.send_message.assert_called_once()
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, app_module.BREVO_API_URL)
+        self.assertEqual(request.get_header('Api-key'), 'test-brevo-key')
+        body = json.loads(request.data.decode('utf-8'))
+        self.assertEqual(body['sender']['email'], 'support@example.test')
+        self.assertEqual(body['sender']['name'], 'TaskPe')
+        self.assertEqual(body['to'][0]['email'], 'recipient@example.test')
+        self.assertIn('token-value', body['textContent'])
 
-    def test_smtp_provider_failure_is_reported_without_exposing_credentials(self):
-        provider = app_module.SmtpEmailProvider()
-        with patch.object(app_module.smtplib, 'SMTP', side_effect=app_module.smtplib.SMTPException('transport failed')):
+    def test_brevo_provider_failure_is_reported_without_exposing_credentials(self):
+        provider = app_module.BrevoEmailProvider()
+        with patch.object(app_module.urllib.request, 'urlopen', side_effect=app_module.urllib.error.URLError('transport failed')):
             self.assertFalse(provider.send_verification('recipient@example.test', 'secret-token'))
+
+    def test_brevo_provider_requires_message_id(self):
+        provider = app_module.BrevoEmailProvider()
+        response = MagicMock(status=201)
+        response.getcode.return_value = 201
+        response.read.return_value = b'{"messageId":""}'
+        response.__enter__.return_value = response
+        with patch.object(app_module.urllib.request, 'urlopen', return_value=response):
+            self.assertFalse(provider.send_verification('recipient@example.test', 'token-value'))
+
+    def test_email_provider_failure_does_not_create_account(self):
+        email = 'provider-failure@example.test'
+        with patch.object(app_module.email_provider, 'send_verification', return_value=False):
+            response = self.client.post('/api/auth/send-email-verification', json={'email': email})
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn('verification_token', response.get_json())
+        conn = database.get_db_connection()
+        self.assertIsNone(conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone())
+        conn.close()
 
     def test_email_device_limit_is_two(self):
         self.assertEqual(self.create_email(1).status_code, 200)

@@ -13,8 +13,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import smtplib
-from email.message import EmailMessage
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from functools import wraps
@@ -72,11 +70,10 @@ DEVICE_COOKIE_NAME = 'taskpe_device'
 EMAIL_DEVICE_ACCOUNT_LIMIT = 2
 MOBILE_DEVICE_ACCOUNT_LIMIT = 4
 EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', 'disabled').strip().lower()
-EMAIL_SMTP_HOST = os.environ.get('EMAIL_SMTP_HOST', '').strip()
-EMAIL_SMTP_PORT_RAW = os.environ.get('EMAIL_SMTP_PORT', '587').strip()
-EMAIL_SMTP_USERNAME = os.environ.get('EMAIL_SMTP_USERNAME', '').strip()
-EMAIL_SMTP_PASSWORD = os.environ.get('EMAIL_SMTP_PASSWORD', '')
+BREVO_API_KEY = os.environ.get('BREVO_API_KEY', '').strip()
 EMAIL_FROM = os.environ.get('EMAIL_FROM', '').strip()
+EMAIL_FROM_NAME = os.environ.get('EMAIL_FROM_NAME', 'TaskPe').strip() or 'TaskPe'
+BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
 SECRET_KEY = os.environ.get('SECRET_KEY', '').strip()
 if IS_PRODUCTION and not SECRET_KEY:
     raise RuntimeError('SECRET_KEY must be set when ENVIRONMENT=production.')
@@ -88,25 +85,17 @@ if IS_PRODUCTION and SMS_PROVIDER == 'fast2sms' and not FAST2SMS_ENABLED:
     raise RuntimeError('FAST2SMS_ENABLED must be 1 when SMS_PROVIDER=fast2sms in production.')
 if IS_PRODUCTION and SMS_PROVIDER == 'fast2sms' and not FAST2SMS_API_KEY:
     raise RuntimeError('FAST2SMS_API_KEY is required when SMS_PROVIDER=fast2sms in production.')
-if EMAIL_PROVIDER not in {'disabled', 'smtp'}:
-    raise RuntimeError('Unsupported EMAIL_PROVIDER. Use smtp or disabled.')
-try:
-    EMAIL_SMTP_PORT = int(EMAIL_SMTP_PORT_RAW)
-except ValueError:
-    raise RuntimeError('EMAIL_SMTP_PORT must be a valid port number.')
-if not 1 <= EMAIL_SMTP_PORT <= 65535:
-    raise RuntimeError('EMAIL_SMTP_PORT must be between 1 and 65535.')
-if IS_PRODUCTION and EMAIL_PROVIDER == 'smtp':
+if EMAIL_PROVIDER not in {'disabled', 'brevo', 'brevo_api'}:
+    raise RuntimeError('Unsupported EMAIL_PROVIDER. Use brevo or disabled.')
+if IS_PRODUCTION and EMAIL_PROVIDER in {'brevo', 'brevo_api'}:
     missing_email_config = [
         name for name, value in {
-            'EMAIL_SMTP_HOST': EMAIL_SMTP_HOST,
-            'EMAIL_SMTP_USERNAME': EMAIL_SMTP_USERNAME,
-            'EMAIL_SMTP_PASSWORD': EMAIL_SMTP_PASSWORD,
+            'BREVO_API_KEY': BREVO_API_KEY,
             'EMAIL_FROM': EMAIL_FROM,
         }.items() if not value
     ]
     if missing_email_config:
-        raise RuntimeError('SMTP email provider configuration is incomplete.')
+        raise RuntimeError('Brevo email provider configuration is incomplete.')
 try:
     TRUSTED_PROXY_HOPS = int(os.environ.get('TRUSTED_PROXY_HOPS', '0'))
 except ValueError:
@@ -356,28 +345,45 @@ class DisabledEmailProvider(EmailProvider):
         return IS_DEVELOPMENT
 
 
-class SmtpEmailProvider(EmailProvider):
+class BrevoEmailProvider(EmailProvider):
     def send_verification(self, recipient, token):
-        message = EmailMessage()
-        message['Subject'] = 'TaskPe email verification'
-        message['From'] = EMAIL_FROM
-        message['To'] = recipient
-        message.set_content(
-            f'Your TaskPe email verification token is: {token}\n'
-            f'This token expires in {EMAIL_VERIFICATION_EXPIRY_MINUTES} minutes.'
+        payload = json.dumps({
+            'sender': {
+                'name': EMAIL_FROM_NAME,
+                'email': EMAIL_FROM,
+            },
+            'to': [{'email': recipient}],
+            'subject': 'TaskPe email verification',
+            'textContent': (
+                f'Your TaskPe email verification token is: {token}\n'
+                f'This token expires in {EMAIL_VERIFICATION_EXPIRY_MINUTES} minutes.'
+            ),
+        }).encode('utf-8')
+        provider_request = urllib.request.Request(
+            BREVO_API_URL,
+            data=payload,
+            headers={
+                'accept': 'application/json',
+                'api-key': BREVO_API_KEY,
+                'content-type': 'application/json',
+            },
+            method='POST',
         )
         try:
-            with smtplib.SMTP(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, timeout=10) as server:
-                server.starttls()
-                server.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
-                server.send_message(message)
-            return True
-        except (OSError, smtplib.SMTPException):
-            logger.warning('SMTP email verification delivery failed.')
+            with urllib.request.urlopen(provider_request, timeout=10) as response:
+                status = int(getattr(response, 'status', response.getcode()))
+                response_body = response.read().decode('utf-8')
+            provider_result = json.loads(response_body) if response_body else {}
+            if 200 <= status < 300 and isinstance(provider_result, dict) and provider_result.get('messageId'):
+                return True
+            logger.warning('Brevo email verification delivery was rejected.')
+            return False
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError, ValueError):
+            logger.warning('Brevo email verification delivery failed.')
             return False
 
 
-email_provider = SmtpEmailProvider() if EMAIL_PROVIDER == 'smtp' else DisabledEmailProvider()
+email_provider = BrevoEmailProvider() if EMAIL_PROVIDER in {'brevo', 'brevo_api'} else DisabledEmailProvider()
 
 
 def send_email_verification(email, token):

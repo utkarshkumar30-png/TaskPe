@@ -100,24 +100,24 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('TASKPE_DB_PATH must be set', result.stderr)
 
-    def test_smtp_provider_requires_complete_production_configuration(self):
+    def test_brevo_provider_requires_complete_production_configuration(self):
         env = os.environ.copy()
         env.update({
             'ENVIRONMENT': 'production',
             'SECRET_KEY': 'production-test-secret',
-            'TASKPE_DB_PATH': os.path.join(_TEST_ROOT, 'smtp-config.db'),
-            'TASKPE_UPLOAD_FOLDER': os.path.join(_TEST_ROOT, 'smtp-proofs'),
-            'TASKPE_TASK_ASSET_FOLDER': os.path.join(_TEST_ROOT, 'smtp-assets'),
-            'EMAIL_PROVIDER': 'smtp',
+            'TASKPE_DB_PATH': os.path.join(_TEST_ROOT, 'brevo-config.db'),
+            'TASKPE_UPLOAD_FOLDER': os.path.join(_TEST_ROOT, 'brevo-proofs'),
+            'TASKPE_TASK_ASSET_FOLDER': os.path.join(_TEST_ROOT, 'brevo-assets'),
+            'EMAIL_PROVIDER': 'brevo',
         })
-        for key in ('EMAIL_SMTP_HOST', 'EMAIL_SMTP_USERNAME', 'EMAIL_SMTP_PASSWORD', 'EMAIL_FROM'):
+        for key in ('BREVO_API_KEY', 'EMAIL_FROM'):
             env.pop(key, None)
         result = subprocess.run(
             [sys.executable, '-c', 'import app'], cwd=os.path.dirname(__file__),
             env=env, capture_output=True, text=True
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('SMTP email provider configuration is incomplete', result.stderr)
+        self.assertIn('Brevo email provider configuration is incomplete', result.stderr)
         self.assertNotIn('production-test-secret', result.stderr)
 
     def test_registration_requires_matching_single_use_nonexpired_verification(self):

@@ -90,22 +90,20 @@ is enforced and externally verified.
 
 `EMAIL_PROVIDER=disabled` disables email delivery. This is the safe default
 and does not send email. When email signup is intentionally enabled, the
-implemented provider is SMTP and requires all of the following:
+implemented provider is Brevo's HTTPS transactional email API and requires:
 
 ```text
-EMAIL_PROVIDER=smtp
-EMAIL_SMTP_HOST=<host>
-EMAIL_SMTP_PORT=<port>
-EMAIL_SMTP_USERNAME=<username>
-EMAIL_SMTP_PASSWORD=<secret>
+EMAIL_PROVIDER=brevo
+BREVO_API_KEY=<secret>
 EMAIL_FROM=<approved-sender>
+EMAIL_FROM_NAME=TaskPe
 ```
 
-In production, the application fails safely at startup when SMTP
+In production, the application fails safely at startup when Brevo
 configuration is incomplete. Credentials are read only from the explicitly
-injected deployment environment and are never stored in this repository. No
-SMTP delivery is claimed by this runbook; delivery requires a separate,
-approved controlled test with an approved sender.
+injected deployment environment and are never stored in this repository.
+Email delivery uses HTTPS and does not use Gmail SMTP, Brevo SMTP, or SMTP
+sockets.
 
 Signup supports mobile OTP and email verification. Mobile signup uses the
 existing Fast2SMS controls. Email signup uses hashed, expiring, one-time
@@ -247,11 +245,11 @@ apply.
 When SMS is disabled, OTP delivery is unavailable and production signup/mobile
 verification must not be treated as verified.
 
-`EMAIL_PROVIDER=disabled` means no email is sent. `EMAIL_PROVIDER=smtp` uses
-the SMTP implementation in `app.py` and requires the complete SMTP
-configuration documented above. Keep email disabled until SMTP credentials,
-sender approval, and a controlled delivery test are complete. Development
-verification tokens are not production email delivery.
+`EMAIL_PROVIDER=disabled` means no email is sent. `EMAIL_PROVIDER=brevo`
+uses Brevo's HTTPS transactional email API and requires the complete Brevo
+configuration documented above. Keep email disabled until the API key and
+approved sender are configured and a controlled delivery test is complete.
+Development verification tokens are not production email delivery.
 
 ## Manual payout mode
 
