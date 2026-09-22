@@ -624,9 +624,9 @@ def calculate_task_payout_paise(conn, task, recipient_count=None):
     return rate_paise * int(count)
 
 def approval_threshold(required_count):
-    """Return the smallest whole-number count meeting the 80% rule."""
+    """Return the minimum positive count required for approval."""
     required = max(0, int(required_count or 0))
-    return (required * 80 + 99) // 100
+    return 1 if required > 0 else 0
 
 def submission_required_count(submission):
     return int(submission['required_count'] or submission['numbers_required'] or 0) if 'required_count' in submission.keys() else int(submission['numbers_required'] or 0)

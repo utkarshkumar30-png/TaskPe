@@ -206,20 +206,9 @@ class Pass3RouteTests(unittest.TestCase):
         self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='one_referral_reversal_per_submission'").fetchone())
         conn.close()
 
-    def test_phase3_threshold_and_verified_count_control_approval(self):
+    def test_manual_approval_allows_any_positive_verified_count_with_proportional_payout(self):
         self._as(self.admin_id)
-        _, assignment_id, below_id = self._task_and_submission(campaign_type='Threshold19', verified=19)
-        before_conn = self._conn()
-        before = before_conn.execute('SELECT wallet_balance FROM users WHERE id=?', (self.worker_id,)).fetchone()[0]
-        before_conn.close()
-        self.assertEqual(self.client.post(f'/api/admin/submissions/{below_id}/approve').status_code, 400)
-        conn = self._conn()
-        self.assertEqual(conn.execute('SELECT status FROM submissions WHERE id=?', (below_id,)).fetchone()[0], 'pending')
-        self.assertEqual(conn.execute('SELECT status FROM task_assignments WHERE id=?', (assignment_id,)).fetchone()[0], 'pending_review')
-        self.assertEqual(conn.execute('SELECT wallet_balance FROM users WHERE id=?', (self.worker_id,)).fetchone()[0], before)
-        conn.close()
-
-        for verified, expected in ((20, 60), (21, 63), (24, 72), (25, 75)):
+        for verified, expected in ((1, 3), (5, 15), (19, 57), (20, 60)):
             _, assignment_id, submission_id = self._task_and_submission(
                 campaign_type=f'Threshold{verified}', verified=verified
             )
