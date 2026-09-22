@@ -1554,20 +1554,24 @@ def get_tasks():
     occupied_by_task = {row['task_id']: row['occupied'] for row in slot_rows}
 
     user_submissions = {}
+    current_assignments = {}
     active_campaigns = {}
     if user_id:
         subs = conn.execute("SELECT task_id, status FROM submissions WHERE user_id = ?", (user_id,)).fetchall()
         for s in subs:
             user_submissions[s['task_id']] = s['status']
         assignments = conn.execute('''
-            SELECT task_id, campaign_type, status FROM task_assignments
-            WHERE user_id = ? AND status IN ('in_progress', 'pending_review')
+            SELECT id, task_id, campaign_type, status FROM task_assignments
+            WHERE user_id = ? AND status IN ('in_progress', 'pending_review', 'paid')
+            ORDER BY id DESC
         ''', (user_id,)).fetchall()
         for assignment in assignments:
-            active_campaigns[assignment['campaign_type']] = {
-                'task_id': assignment['task_id'],
-                'status': assignment['status']
-            }
+            current_assignments.setdefault(assignment['task_id'], assignment)
+            if assignment['status'] in ('in_progress', 'pending_review'):
+                active_campaigns.setdefault(assignment['campaign_type'], {
+                    'task_id': assignment['task_id'],
+                    'status': assignment['status']
+                })
     result = []
     for t in tasks:
         target_nums = []
@@ -1577,6 +1581,7 @@ def get_tasks():
             target_nums = [t['target_numbers']]
 
         user_status = user_submissions.get(t['id'], None)
+        current_assignment = current_assignments.get(t['id'])
 
         result.append({
             'id': t['id'],
@@ -1604,6 +1609,8 @@ def get_tasks():
             'slots_remaining': max(0, t['total_slots'] - occupied_by_task.get(t['id'], 0)),
             'status': t['status'],
             'user_submission_status': user_status,
+            'current_assignment_id': current_assignment['id'] if current_assignment else None,
+            'current_assignment_status': current_assignment['status'] if current_assignment else None,
             'campaign_active': t['category'] in active_campaigns,
             'campaign_active_status': active_campaigns.get(t['category'], {}).get('status'),
             'active_task_id': active_campaigns.get(t['category'], {}).get('task_id')
@@ -1698,7 +1705,12 @@ def get_task_detail(task_id):
         ''', (task_id, user_id)).fetchone()
         if assignment:
             target_nums = get_assigned_numbers(assignment)
-        sub = conn.execute("SELECT * FROM submissions WHERE task_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1", (task_id, user_id)).fetchone()
+        sub = None
+        if assignment:
+            sub = conn.execute(
+                "SELECT * FROM submissions WHERE assignment_id = ? ORDER BY id DESC LIMIT 1",
+                (assignment['id'],)
+            ).fetchone()
         if sub:
             submission = {
                 'id': sub['id'],

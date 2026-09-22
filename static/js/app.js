@@ -705,7 +705,12 @@ function renderTaskDetailView(task) {
   const assignmentIsActive = task.assignment_status === 'in_progress';
   cancelButton.classList.toggle('hidden', !assignmentIsActive);
 
-  if (task.user_submission) {
+  // The assignment is the source of truth for the current slot. A prior
+  // submission for the same task/campaign must not hide a new slot's uploader.
+  if (assignmentIsActive) {
+    subBanner.classList.add('hidden');
+    subForm.classList.remove('hidden');
+  } else if (task.user_submission) {
     subBanner.classList.remove('hidden');
     if (task.user_submission.status === 'approved') {
       subBanner.className = 'mb-4 p-4 rounded-2xl border border-emerald-500/40 bg-emerald-950/20 text-emerald-300 text-xs';
