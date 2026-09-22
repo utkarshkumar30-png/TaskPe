@@ -689,7 +689,7 @@ function renderTaskDetailView(task) {
             <i class="fa-regular fa-copy"></i>
           </button>
           <span id="recipient-state-${cleanNum}" class="text-[10px] ${opened ? 'text-emerald-400' : 'text-slate-500'}">${opened ? 'Opened' : 'Pending'}</span>
-          <a href="${waUrl}" target="_blank" rel="noopener noreferrer" onclick="markRecipientOpened(${task.id}, '${cleanNum}')" class="min-h-11 px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold transition flex items-center gap-1">
+          <a href="${waUrl}" target="_blank" rel="noopener noreferrer" onclick="markRecipientOpened(${task.id}, '${cleanNum}'); recordRecipientAuditEvent(${task.id}, ${task.assignment_id || 0}, '${cleanNum}')" class="min-h-11 px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold transition flex items-center gap-1">
             <i class="fa-brands fa-whatsapp text-sm"></i>
             <span>Open WhatsApp</span>
           </a>
@@ -769,6 +769,21 @@ function markRecipientOpened(taskId, number) {
   localStorage.setItem(key, JSON.stringify([...opened]));
   const state = document.getElementById(`recipient-state-${number}`);
   if (state) { state.textContent = 'Opened'; state.className = 'text-[10px] text-emerald-400'; }
+}
+
+function recordRecipientAuditEvent(taskId, assignmentId, recipientNumber) {
+  if (!assignmentId) return;
+  fetch(`/api/tasks/${taskId}/recipient-audit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      assignment_id: assignmentId,
+      recipient_number: recipientNumber
+    }),
+    keepalive: true
+  }).catch(() => {
+    // Opening WhatsApp remains the primary action; audit capture is best effort.
+  });
 }
 
 async function loadServerCountdown(taskId) {

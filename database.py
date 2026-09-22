@@ -21,6 +21,7 @@ REQUIRED_SCHEMA = {
     'task_assignments': {'id', 'user_id', 'task_id', 'campaign_id', 'campaign_type', 'assigned_numbers', 'status', 'assigned_at', 'started_at', 'expires_at', 'slot_released', 'completed_at'},
     'target_number_records': {'id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'target_number', 'normalized_target_number', 'status', 'reward_per_number', 'reward_per_number_paise', 'verified_at', 'paid_at', 'paid_amount', 'paid_amount_paise', 'created_at', 'updated_at'},
     'target_payments': {'id', 'target_number_record_id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'submission_id', 'target_number', 'normalized_target_number', 'amount', 'amount_paise', 'rate', 'rate_paise', 'payment_reference', 'paid_at'},
+    'message_audit_records': {'id', 'task_id', 'campaign_id', 'assignment_id', 'user_id', 'target_number_record_id', 'recipient_allocation_id', 'recipient_number', 'normalized_recipient_number', 'sender_number', 'message_text', 'status', 'first_opened_at', 'last_opened_at', 'open_count', 'submission_id', 'created_at', 'updated_at'},
     'admin_assignment_release_audit': {'id', 'assignment_id', 'admin_user_id', 'worker_user_id', 'task_id', 'old_status', 'new_status', 'reason', 'created_at'},
     'recipient_allocations': {'id', 'campaign_id', 'phone_number', 'assignment_id', 'user_id', 'last_contacted_at', 'status'},
     'submissions': {'id', 'user_id', 'task_id', 'assignment_id', 'proof_image', 'notes', 'status', 'admin_feedback', 'payout_amount', 'audit_badge', 'audit_score', 'numbers_detected', 'numbers_required', 'invalid_count', 'approved_valid_count', 'auto_approved', 'submitted_at', 'reviewed_at', 'required_count', 'verified_count', 'approval_threshold', 'per_number_rate', 'payout_paise', 'per_number_rate_paise'},
@@ -42,6 +43,8 @@ REQUIRED_INDEXES = {
     'target_number_records_assignment_status',
     'target_number_records_normalized_lookup',
     'target_payments_submission_lookup',
+    'message_audit_assignment_recipient_unique',
+    'message_audit_report_lookup',
     'one_target_payment_per_campaign_number',
     'recipient_allocations_one_active',
     'recipient_allocations_campaign_state',
@@ -713,6 +716,48 @@ def initialize_database():
             UNIQUE(submission_id, sort_order),
             FOREIGN KEY (submission_id) REFERENCES submissions(id)
         )
+    ''')
+
+    # Non-invasive per-recipient audit trail for the existing manual WhatsApp
+    # workflow. Repeated opens of the same recipient within one assignment are
+    # idempotent; reuse in a later assignment creates a separate history row.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_audit_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            campaign_id INTEGER,
+            assignment_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            target_number_record_id INTEGER,
+            recipient_allocation_id INTEGER,
+            recipient_number TEXT NOT NULL,
+            normalized_recipient_number TEXT NOT NULL,
+            sender_number TEXT,
+            message_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPENED'
+                CHECK (status IN ('OPENED', 'ATTEMPTED')),
+            first_opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            open_count INTEGER NOT NULL DEFAULT 1,
+            submission_id INTEGER,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (assignment_id, normalized_recipient_number),
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (assignment_id) REFERENCES task_assignments(id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (target_number_record_id) REFERENCES target_number_records(id),
+            FOREIGN KEY (recipient_allocation_id) REFERENCES recipient_allocations(id),
+            FOREIGN KEY (submission_id) REFERENCES submissions(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS message_audit_assignment_recipient_unique
+        ON message_audit_records(assignment_id, normalized_recipient_number)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS message_audit_report_lookup
+        ON message_audit_records(campaign_id, task_id, user_id, first_opened_at)
     ''')
 
     # Settings Table

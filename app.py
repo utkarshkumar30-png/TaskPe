@@ -1,5 +1,7 @@
 import os
+import csv
 import json
+import io
 import random
 import string
 import hashlib
@@ -16,7 +18,7 @@ import urllib.request
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, session, send_from_directory
+from flask import Flask, request, jsonify, render_template, session, send_from_directory, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -1683,6 +1685,99 @@ def take_task(task_id):
     finally:
         conn.close()
 
+@app.route('/api/tasks/<int:task_id>/recipient-audit', methods=['POST'])
+@login_required
+def record_recipient_audit_event(task_id):
+    """Record the worker-triggered WhatsApp open for one assigned recipient."""
+    data = request.get_json(silent=True) or {}
+    try:
+        assignment_id = int(data.get('assignment_id'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'A valid assignment is required.'}), 400
+
+    recipient_number = str(data.get('recipient_number') or '').strip()
+    normalized_recipient = normalize_phone_number(recipient_number)
+    if not normalized_recipient:
+        return jsonify({'success': False, 'message': 'A valid recipient number is required.'}), 400
+
+    user = get_current_user()
+    conn = database.get_db_connection()
+    try:
+        assignment = conn.execute('''
+            SELECT ta.id, ta.task_id, ta.campaign_id, ta.user_id, ta.assigned_numbers,
+                   t.template_text, t.destination_link
+            FROM task_assignments ta
+            JOIN tasks t ON t.id = ta.task_id
+            WHERE ta.id = ? AND ta.task_id = ? AND ta.user_id = ?
+              AND ta.status = 'in_progress'
+              AND ta.expires_at IS NOT NULL
+              AND ta.expires_at > CURRENT_TIMESTAMP
+        ''', (assignment_id, task_id, user['id'])).fetchone()
+        if not assignment:
+            return jsonify({'success': False, 'message': 'Active assignment not found.'}), 404
+
+        assigned_numbers = {
+            normalize_phone_number(number) for number in get_assigned_numbers(assignment)
+        }
+        if normalized_recipient not in assigned_numbers:
+            return jsonify({'success': False, 'message': 'Recipient is not assigned to this worker slot.'}), 403
+
+        allocation = conn.execute('''
+            SELECT id FROM recipient_allocations
+            WHERE assignment_id = ? AND phone_number = ?
+            LIMIT 1
+        ''', (assignment_id, normalized_recipient)).fetchone()
+        if not allocation:
+            return jsonify({'success': False, 'message': 'Recipient allocation not found.'}), 404
+
+        message_text = assignment['template_text'] or ''
+        if assignment['destination_link'] and assignment['destination_link'] not in message_text:
+            message_text = f'{message_text}\n\n{assignment["destination_link"]}'
+        if len(message_text) > 10000:
+            return jsonify({'success': False, 'message': 'Message template is too long.'}), 400
+
+        target_record = conn.execute('''
+            SELECT id FROM target_number_records
+            WHERE assignment_id = ? AND normalized_target_number = ?
+            LIMIT 1
+        ''', (assignment_id, normalized_recipient)).fetchone()
+        conn.execute('''
+            INSERT INTO message_audit_records
+                (task_id, campaign_id, assignment_id, user_id,
+                 target_number_record_id, recipient_allocation_id,
+                 recipient_number, normalized_recipient_number,
+                 message_text, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPENED')
+            ON CONFLICT(assignment_id, normalized_recipient_number) DO UPDATE SET
+                message_text = CASE
+                    WHEN excluded.message_text != '' THEN excluded.message_text
+                    ELSE message_audit_records.message_text
+                END,
+                last_opened_at = CURRENT_TIMESTAMP,
+                open_count = message_audit_records.open_count + 1,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (
+            assignment['task_id'], assignment['campaign_id'], assignment['id'], assignment['user_id'],
+            target_record['id'] if target_record else None, allocation['id'],
+            normalized_recipient, normalized_recipient, message_text,
+        ))
+        row = conn.execute('''
+            SELECT id, status, first_opened_at, last_opened_at, open_count
+            FROM message_audit_records
+            WHERE assignment_id = ? AND normalized_recipient_number = ?
+        ''', (assignment_id, normalized_recipient)).fetchone()
+        conn.commit()
+        return jsonify({
+            'success': True,
+            'audit_id': row['id'],
+            'status': row['status'],
+            'first_opened_at': row['first_opened_at'],
+            'last_opened_at': row['last_opened_at'],
+            'open_count': row['open_count'],
+        })
+    finally:
+        conn.close()
+
 @app.route('/api/tasks/<int:task_id>', methods=['GET'])
 def get_task_detail(task_id):
     conn = database.get_db_connection()
@@ -1926,6 +2021,25 @@ def submit_task_proof(task_id):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (user['id'], task_id, assignment['id'], filenames[0], notes, sub_status, admin_feedback, str(paise_to_inr(payout_amount_paise)), payout_amount_paise, audit_badge, audit_score, numbers_detected, numbers_required, audit_res['invalid_count'], numbers_detected if is_auto_approved else None, is_auto_approved, reviewed_at, numbers_required, numbers_detected, approval_minimum, str(paise_to_inr(per_number_rate_paise)), per_number_rate_paise))
     sub_id = cursor.lastrowid
+    try:
+        cursor.execute('''
+            UPDATE message_audit_records
+            SET target_number_record_id = (
+                    SELECT tnr.id
+                    FROM target_number_records tnr
+                    WHERE tnr.assignment_id = message_audit_records.assignment_id
+                      AND tnr.normalized_target_number = message_audit_records.normalized_recipient_number
+                    LIMIT 1
+                ),
+                submission_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE assignment_id = ?
+        ''', (sub_id, assignment['id']))
+    except sqlite3.Error:
+        logger.warning(
+            'Optional message audit synchronization failed for submission %s',
+            sub_id,
+            exc_info=True,
+        )
     if is_auto_approved:
         settle_recipient_allocations_for_approval(conn, assignment['id'])
         finalize_target_records_for_approval(
@@ -2220,6 +2334,119 @@ def admin_submissions():
 
     conn.close()
     return jsonify({'success': True, 'submissions': result})
+
+@app.route('/api/admin/audit-report.csv', methods=['GET'])
+@admin_required
+def admin_audit_report():
+    """Export per-recipient audit attempts with existing proof and payment state."""
+    conn = database.get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT mar.id AS audit_id, mar.task_id, mar.campaign_id,
+                   mar.assignment_id, mar.user_id, mar.sender_number,
+                   mar.recipient_number, mar.message_text,
+                   mar.first_opened_at, mar.last_opened_at, mar.open_count,
+                   mar.target_number_record_id, mar.submission_id,
+                   t.title AS task_title,
+                   ta.status AS assignment_status,
+                   tnr.status AS target_status, tnr.verified_at,
+                   tnr.paid_at AS target_paid_at,
+                   s.status AS submission_status, s.submitted_at,
+                   s.reviewed_at, s.audit_score, s.admin_feedback,
+                   tp.amount AS paid_amount, tp.paid_at AS payment_timestamp
+            FROM message_audit_records mar
+            LEFT JOIN tasks t ON t.id = mar.task_id
+            LEFT JOIN task_assignments ta ON ta.id = mar.assignment_id
+            LEFT JOIN target_number_records tnr ON tnr.id = mar.target_number_record_id
+            LEFT JOIN submissions s ON s.id = mar.submission_id
+            LEFT JOIN target_payments tp ON tp.target_number_record_id = mar.target_number_record_id
+            ORDER BY mar.id
+        ''').fetchall()
+    finally:
+        conn.close()
+
+    output = io.StringIO(newline='')
+    writer = csv.writer(output)
+    writer.writerow([
+        'No', 'ID Data', 'BLAST ID / Campaign', 'Task ID', 'Task Title',
+        'Assignment ID', 'User ID', 'Pengirim', 'Penerima', 'Teks',
+        'Status', 'Alasan', 'Jam Audit Event', 'Open Count',
+        'Proof/OCR Status', 'Approval Status', 'Paid Amount', 'Payment Timestamp',
+    ])
+    for row_number, row in enumerate(rows, start=1):
+        target_status = row['target_status']
+        submission_status = row['submission_status']
+        paid = row['paid_amount'] is not None or target_status == 'paid'
+        if paid:
+            attempt_status = 'PAID'
+        elif target_status == 'verified':
+            attempt_status = 'VERIFIED'
+        elif target_status == 'rejected':
+            attempt_status = 'FAILED/UNVERIFIED'
+        elif target_status == 'remaining':
+            attempt_status = 'REMAINING/UNSETTLED'
+        elif submission_status == 'rejected':
+            attempt_status = 'PROOF_REJECTED'
+        else:
+            attempt_status = 'OPENED'
+
+        if target_status in ('verified', 'paid'):
+            proof_status = 'VERIFIED'
+        elif target_status == 'rejected':
+            proof_status = 'UNVERIFIED'
+        elif target_status == 'remaining':
+            proof_status = 'REMAINING/UNSETTLED'
+        elif submission_status == 'rejected':
+            proof_status = 'REJECTED'
+        elif submission_status:
+            proof_status = 'SUBMITTED'
+        else:
+            proof_status = 'NOT_SUBMITTED'
+
+        if paid or target_status == 'paid':
+            approval_status = 'PAID'
+        elif submission_status == 'approved':
+            approval_status = 'APPROVED'
+        elif submission_status == 'pending':
+            approval_status = 'PENDING'
+        elif submission_status == 'rejected':
+            approval_status = 'REJECTED'
+        else:
+            approval_status = 'NOT_SUBMITTED'
+
+        if target_status == 'rejected':
+            reason = 'Not verified by available proof.'
+        elif target_status == 'remaining':
+            reason = 'Not selected for payment; remains unsettled.'
+        elif submission_status == 'rejected':
+            reason = row['admin_feedback'] or 'Proof submission rejected by admin.'
+        else:
+            reason = ''
+
+        writer.writerow([
+            row_number,
+            row['audit_id'],
+            row['campaign_id'],
+            row['task_id'],
+            row['task_title'] or '',
+            row['assignment_id'],
+            row['user_id'],
+            row['sender_number'] or '',
+            row['recipient_number'],
+            row['message_text'],
+            attempt_status,
+            reason,
+            row['first_opened_at'],
+            row['open_count'],
+            proof_status,
+            approval_status,
+            row['paid_amount'] if row['paid_amount'] is not None else '',
+            row['payment_timestamp'] or row['target_paid_at'] or '',
+        ])
+
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = 'attachment; filename=taskpe-message-audit.csv'
+    return response
 
 @app.route('/api/admin/settings', methods=['GET'])
 @admin_required
