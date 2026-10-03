@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TaskPe - WhatsApp Task Earning Platform | Earn ₹500–₹1,500 Daily</title>
+  <title>TaskPe - Microtasks & Consumer Research Platform</title>
   <!-- Google Fonts: Inter & Plus Jakarta Sans -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -48,19 +48,26 @@
         <!-- Brand Logo -->
         <div class="flex items-center gap-3 cursor-pointer" onclick="navigate('home')">
           <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-green-400 flex items-center justify-center text-white shadow-lg glow-wa-sm">
-            <i class="fa-brands fa-whatsapp text-2xl"></i>
+            <i class="fa-solid fa-layer-group text-2xl"></i>
           </div>
           <div>
             <div class="flex items-center gap-1.5">
               <span class="text-xl font-extrabold font-heading tracking-tight text-white">Task<span class="text-emerald-400">Pe</span></span>
               <span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.2 bg-emerald-500/20 text-emerald-400 rounded border border-emerald-500/30">Earn</span>
             </div>
-            <p class="text-[10px] text-slate-400 -mt-1">WhatsApp Micro-Jobs</p>
+            <p class="text-[10px] text-slate-400 -mt-1">Microtasks & Consumer Research</p>
           </div>
         </div>
 
         <!-- Navigation Links (Desktop) -->
-        <nav class="hidden md:flex items-center space-x-1 lg:space-x-2">
+        <nav id="public-home-links" class="hidden md:flex items-center space-x-1 lg:space-x-2" aria-label="Public homepage navigation"{% if session.get('user_id') %} style="display: none;"{% endif %}>
+          <a href="#view-home" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Home</a>
+          <a href="#how-it-works" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">How It Works</a>
+          <a href="#business-contact" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">For Businesses</a>
+          <a href="#task-categories" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Task Categories</a>
+        </nav>
+
+        <nav id="account-home-links" class="hidden md:flex items-center space-x-1 lg:space-x-2"{% if not session.get('user_id') %} style="display: none;"{% endif %}>
           <button onclick="navigate('home')" id="nav-home" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Home</button>
           <button onclick="navigate('tasks')" id="nav-tasks" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Tasks</button>
           <button onclick="navigate('wallet')" id="nav-wallet" class="nav-btn px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition">Wallet & UPI</button>
@@ -139,22 +146,14 @@
     </div>
   </header>
 
-  <!-- LIVE EARNINGS TICKER -->
-  <div class="bg-slate-900/90 border-b border-slate-800/80 py-2 px-4 overflow-hidden text-xs">
+  <!-- PLATFORM POSITIONING STRIP -->
+  <div id="platform-announcement" class="bg-slate-900/90 border-b border-slate-800/80 py-2 px-4 overflow-hidden text-xs">
     <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
       <div class="flex items-center gap-2 shrink-0">
         <span class="w-2 h-2 rounded-full bg-emerald-400 live-dot"></span>
-        <span class="font-bold text-emerald-400 uppercase text-[10px] tracking-wider">Live Payouts</span>
+        <span class="font-bold text-emerald-400 uppercase text-[10px] tracking-wider">TaskPe Platform</span>
       </div>
-      <div class="marquee-wrapper overflow-hidden relative flex-1 text-slate-400 text-xs">
-        <div class="inline-flex space-x-8 animate-pulse text-[11px]">
-          <span>⚡ <b class="text-white">Rohan S.</b> completed Task #1 (<span class="text-emerald-400 font-semibold">+₹70.00</span>)</span>
-          <span>⚡ <b class="text-white">Priya P.</b> withdrew <span class="text-emerald-400 font-semibold">₹120.00</span> via UPI</span>
-          <span>⚡ <b class="text-white">Amit K.</b> earned <span class="text-emerald-400 font-semibold">₹80.00</span> on Webinar Broadcast</span>
-          <span>⚡ <b class="text-white">Sneha M.</b> earned a <span class="text-emerald-400 font-semibold">10% lifetime referral commission</span></span>
-          <span>⚡ <b class="text-white">Vikram J.</b> withdrew <span class="text-emerald-400 font-semibold">₹250.00</span> to Google Pay</span>
-        </div>
-      </div>
+      <span class="text-[11px] text-slate-400 text-right">Structured tasks for earners and real-world research for businesses.</span>
     </div>
   </div>
 
@@ -164,131 +163,117 @@
     <!-- ============================================== -->
     <!-- VIEW 1: HOME / LANDING PAGE                    -->
     <!-- ============================================== -->
-    <section id="view-home" class="py-12 sm:py-16">
-      <!-- Hero -->
-      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold mb-6">
-          <i class="fa-brands fa-whatsapp text-sm"></i> #1 WhatsApp Micro-Job Platform in India
-        </div>
-        <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold font-heading tracking-tight leading-tight mb-6">
-          Earn <span class="text-gradient-wa">₹500 to ₹1,500</span> Daily<br class="hidden sm:inline"> from WhatsApp Tasks
-        </h1>
-        <p class="max-w-2xl mx-auto text-base sm:text-lg text-slate-300 mb-8 font-normal">
-          Send campaign templates and promo links to verified numbers from your phone. Submit screenshot proof and withdraw your earnings directly to UPI (GPay / PhonePe / Paytm).
-        </p>
-
-        <div class="flex flex-wrap items-center justify-center gap-4 mb-12">
-          <button onclick="navigate('tasks')" class="px-8 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-base shadow-xl glow-wa transition transform hover:-translate-y-0.5 flex items-center gap-2">
-            <i class="fa-solid fa-bolt"></i> Start Earning Now
-          </button>
-        </div>
-
-        <!-- Trust Stats Strip -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto mb-16">
-          <div class="glass-card p-4 rounded-2xl">
-            <div class="text-2xl sm:text-3xl font-extrabold text-white font-heading">₹70–₹90</div>
-            <div class="text-xs text-slate-400 mt-1">Average Task Payout</div>
+    <section id="view-home" class="py-4 sm:py-8">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <!-- Hero -->
+        <div class="grid lg:grid-cols-[1.15fr_0.85fr] gap-8 lg:gap-16 items-center py-2 sm:py-6">
+          <div>
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold mb-6">
+              <i class="fa-solid fa-sparkles text-sm"></i> Microtasks & Consumer Research Platform
+            </div>
+            <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold font-heading tracking-tight leading-tight mb-6">
+              Real People.<br><span class="text-gradient-wa">Real Tasks.</span><br>Real Results.
+            </h1>
+            <p class="max-w-2xl text-base sm:text-lg text-slate-300 mb-8 leading-relaxed">
+              TaskPe connects people with structured microtasks and gives businesses a practical way to learn from real-world activity. WhatsApp tasks are supported alongside research, testing, feedback, and data work.
+            </p>
+            <div class="flex flex-col sm:flex-row gap-3">
+              <button onclick="navigate('tasks')" class="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-base shadow-xl glow-wa transition flex items-center justify-center gap-2">
+                <i class="fa-solid fa-arrow-right"></i> Explore Tasks
+              </button>
+              <button type="button" onclick="openCampaignRequestModal()" class="px-6 py-3.5 rounded-xl border border-slate-700 hover:border-emerald-400 hover:bg-slate-800/70 text-white font-bold text-base transition flex items-center justify-center gap-2">
+                <i class="fa-solid fa-building"></i> Request a Campaign
+              </button>
+            </div>
+            <p class="mt-4 text-xs text-slate-500">Task availability, requirements, and rewards are shown inside the platform.</p>
           </div>
-          <div class="glass-card p-4 rounded-2xl">
-            <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 font-heading">3 Mins</div>
-            <div class="text-xs text-slate-400 mt-1">Average Time Per Task</div>
-          </div>
-          <div class="glass-card p-4 rounded-2xl">
-            <div class="text-2xl sm:text-3xl font-extrabold text-white font-heading">Instant UPI</div>
-            <div class="text-xs text-slate-400 mt-1">Fast Withdrawals</div>
-          </div>
-          <div class="glass-card p-4 rounded-2xl">
-            <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 font-heading">100% Free</div>
-            <div class="text-xs text-slate-400 mt-1">Zero Joining Fee</div>
-          </div>
-        </div>
-
-        <!-- 3-STEP PROCESS -->
-        <div class="py-12 border-t border-slate-800/80">
-          <div class="text-center mb-12">
-            <h2 class="text-2xl sm:text-3xl font-bold font-heading text-white">How TaskPe Works in 3 Steps</h2>
-            <p class="text-sm text-slate-400 mt-2">No complicated skills required. If you use WhatsApp, you can earn.</p>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-left">
-            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
-              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
-                01
+          <div class="relative">
+            <div class="absolute -inset-4 rounded-[2rem] bg-emerald-500/10 blur-2xl"></div>
+            <div class="relative glass-card rounded-3xl p-5 sm:p-7 border-emerald-500/30">
+              <div class="flex items-center justify-between mb-6">
+                <div>
+                  <p class="text-xs uppercase tracking-[0.2em] text-emerald-400 font-bold">One platform</p>
+                  <h2 class="text-2xl font-bold text-white font-heading mt-1">Many ways to participate</h2>
+                </div>
+                <div class="w-12 h-12 rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center text-xl"><i class="fa-solid fa-diagram-project"></i></div>
               </div>
-              <h3 class="text-lg font-bold text-white mb-2">Pick a WhatsApp Task</h3>
-              <p class="text-sm text-slate-400">Choose from available tasks like promotional messages, webinar links, or status updates with payouts up to ₹90 each.</p>
-            </div>
-
-            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
-              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
-                02
+              <div class="space-y-3">
+                <div class="flex gap-3 items-center rounded-xl bg-slate-900/70 p-3"><i class="fa-solid fa-user-check text-emerald-400 w-5 text-center"></i><span class="text-sm text-slate-200">Complete tasks with clear instructions</span></div>
+                <div class="flex gap-3 items-center rounded-xl bg-slate-900/70 p-3"><i class="fa-solid fa-comments text-blue-400 w-5 text-center"></i><span class="text-sm text-slate-200">Share useful feedback and observations</span></div>
+                <div class="flex gap-3 items-center rounded-xl bg-slate-900/70 p-3"><i class="fa-solid fa-shield-check text-amber-400 w-5 text-center"></i><span class="text-sm text-slate-200">Submit proof for structured review</span></div>
               </div>
-              <h3 class="text-lg font-bold text-white mb-2">Send Using Direct Link</h3>
-              <p class="text-sm text-slate-400">Copy our pre-written template and click our 1-click WhatsApp deep link to instantly open chats with the message pre-filled.</p>
-            </div>
-
-            <div class="glass-card p-6 rounded-2xl relative border-emerald-500/20 hover:border-emerald-500/50 transition">
-              <div class="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl font-bold mb-4 font-heading">
-                03
-              </div>
-              <h3 class="text-lg font-bold text-white mb-2">Upload Proof & Get Paid</h3>
-              <p class="text-sm text-slate-400">Snap a quick screenshot showing sent double ticks, upload it, and get paid directly into your TaskPe wallet to withdraw via UPI.</p>
+              <div class="mt-5 pt-5 border-t border-slate-800 text-xs text-slate-400 flex items-start gap-2"><i class="fa-solid fa-circle-info text-emerald-400 mt-0.5"></i><span>TaskPe does not promise a fixed volume of tasks or earnings. Check the live task list for current opportunities.</span></div>
             </div>
           </div>
         </div>
 
-        <!-- EARNINGS CALCULATOR -->
-        <div class="my-12 glass-card p-8 rounded-3xl max-w-3xl mx-auto border-emerald-500/30">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="text-xl font-bold text-white font-heading">Calculate Your Monthly Earnings</h3>
-            <span class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400">Interactive</span>
-          </div>
-          <p class="text-sm text-slate-400 text-left mb-6">See how much you can make daily and monthly by doing simple WhatsApp tasks in your free time:</p>
+        <!-- Two audiences -->
+        <div class="grid md:grid-cols-2 gap-5 sm:gap-6 py-12 border-t border-slate-800/80">
+          <article class="glass-card rounded-3xl p-6 sm:p-8 border-emerald-500/25">
+            <div class="w-12 h-12 rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center text-xl mb-5"><i class="fa-solid fa-person-running"></i></div>
+            <p class="text-xs uppercase tracking-[0.2em] text-emerald-400 font-bold">For Earners</p>
+            <h2 class="text-2xl font-bold text-white font-heading mt-2 mb-3">Turn spare time into verified work.</h2>
+            <p class="text-sm text-slate-400 leading-relaxed mb-5">Browse available tasks, follow the instructions, submit the requested proof, and track approved work from your TaskPe account.</p>
+            <button onclick="navigate('tasks')" class="text-sm font-bold text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-2">View available tasks <i class="fa-solid fa-arrow-right"></i></button>
+          </article>
+          <article class="glass-card rounded-3xl p-6 sm:p-8 border-blue-500/25">
+            <div class="w-12 h-12 rounded-2xl bg-blue-500/15 text-blue-400 flex items-center justify-center text-xl mb-5"><i class="fa-solid fa-briefcase"></i></div>
+            <p class="text-xs uppercase tracking-[0.2em] text-blue-400 font-bold">For Businesses</p>
+            <h2 class="text-2xl font-bold text-white font-heading mt-2 mb-3">Get structured work from real users.</h2>
+            <p class="text-sm text-slate-400 leading-relaxed mb-5">Define a campaign, specify the audience and proof requirements, and use TaskPe to coordinate real users completing practical tasks and research activities.</p>
+            <button type="button" onclick="openCampaignRequestModal()" class="text-sm font-bold text-blue-400 hover:text-blue-300 inline-flex items-center gap-2">Discuss a campaign <i class="fa-solid fa-arrow-right"></i></button>
+          </article>
+        </div>
 
-          <div class="text-left mb-6">
-            <div class="flex justify-between items-center mb-2">
-              <label for="tasks-calc-slider" class="text-sm font-semibold text-slate-300">Tasks Completed Per Day:</label>
-              <span id="calc-tasks-label" class="text-lg font-extrabold text-emerald-400">10 Tasks / Day</span>
-            </div>
-            <input type="range" id="tasks-calc-slider" min="1" max="25" value="10" class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500" oninput="updateCalculator(this.value)">
-            <div class="flex justify-between text-[11px] text-slate-400 mt-1">
-              <span>1 Task (10 mins)</span>
-              <span>10 Tasks (1 hour)</span>
-              <span>25 Tasks (2.5 hours)</span>
-            </div>
+        <!-- Task categories -->
+        <div id="task-categories" class="py-12 border-t border-slate-800/80 scroll-mt-24">
+          <div class="max-w-2xl mb-8">
+            <p class="text-xs uppercase tracking-[0.2em] text-emerald-400 font-bold">Task categories</p>
+            <h2 class="text-2xl sm:text-3xl font-bold font-heading text-white mt-2">Built for useful, repeatable work.</h2>
+            <p class="text-sm text-slate-400 mt-2">The available mix can evolve by campaign. WhatsApp remains supported as one category, not the whole platform.</p>
           </div>
-
-          <div class="grid grid-cols-2 gap-4 pt-4 border-t border-slate-700">
-            <div class="bg-slate-900/80 p-4 rounded-xl text-center">
-              <div class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Daily Potential</div>
-              <div id="calc-daily-earning" class="text-2xl sm:text-3xl font-black text-white font-heading mt-1">₹700</div>
-            </div>
-            <div class="bg-emerald-950/40 border border-emerald-500/30 p-4 rounded-xl text-center">
-              <div class="text-xs text-emerald-400 uppercase tracking-wider font-semibold">Monthly Potential</div>
-              <div id="calc-monthly-earning" class="text-2xl sm:text-3xl font-black text-emerald-400 font-heading mt-1">₹21,000</div>
-            </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+            <button type="button" onclick="navigate('tasks', {category: 'App & Website Testing'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-emerald-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-mobile-screen-button text-emerald-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">App & Website Testing</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'Customer Feedback'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-blue-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-message text-blue-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">Customer Feedback</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'Surveys & Market Research'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-amber-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-square-poll-vertical text-amber-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">Surveys & Market Research</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'Search & Data Research'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-purple-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-magnifying-glass-chart text-purple-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">Search & Data Research</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'Local Business Research'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-rose-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-location-dot text-rose-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">Local Business Research</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'Data & AI Tasks'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-cyan-400/60 hover:-translate-y-0.5 transition"><i class="fa-solid fa-database text-cyan-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">Data & AI Tasks</p></button>
+            <button type="button" onclick="navigate('tasks', {category: 'WhatsApp Tasks'})" class="glass-card rounded-2xl p-4 text-left cursor-pointer hover:border-green-400/60 hover:-translate-y-0.5 transition"><i class="fa-brands fa-whatsapp text-green-400 text-lg"></i><p class="text-xs font-semibold text-white mt-3">WhatsApp Tasks</p></button>
           </div>
         </div>
 
-        <!-- FAQ SECTION -->
+        <!-- How it works -->
+        <div id="how-it-works" class="py-12 border-t border-slate-800/80 scroll-mt-24">
+          <div class="text-center mb-10"><p class="text-xs uppercase tracking-[0.2em] text-emerald-400 font-bold">Simple by design</p><h2 class="text-2xl sm:text-3xl font-bold font-heading text-white mt-2">From brief to useful result.</h2></div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-5 text-left">
+            <div class="glass-card p-6 rounded-2xl"><div class="w-11 h-11 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-lg font-bold mb-4">01</div><h3 class="text-lg font-bold text-white mb-2">Choose the right task</h3><p class="text-sm text-slate-400">Earners review the task brief, category, requirements, and available reward before starting.</p></div>
+            <div class="glass-card p-6 rounded-2xl"><div class="w-11 h-11 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center text-lg font-bold mb-4">02</div><h3 class="text-lg font-bold text-white mb-2">Complete the activity</h3><p class="text-sm text-slate-400">Follow the campaign instructions carefully, whether the task involves research, feedback, testing, or WhatsApp.</p></div>
+            <div class="glass-card p-6 rounded-2xl"><div class="w-11 h-11 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-lg font-bold mb-4">03</div><h3 class="text-lg font-bold text-white mb-2">Submit and review</h3><p class="text-sm text-slate-400">Upload the requested proof. Approved work is reflected in the existing TaskPe account and payout workflow.</p></div>
+          </div>
+        </div>
+
+        <!-- Business CTA -->
+        <div id="business-contact" class="my-8 scroll-mt-24 rounded-3xl border border-blue-500/30 bg-gradient-to-br from-blue-950/50 to-slate-900 p-6 sm:p-10 text-center">
+          <div class="w-14 h-14 mx-auto rounded-2xl bg-blue-500/15 text-blue-300 flex items-center justify-center text-2xl mb-5"><i class="fa-solid fa-bullhorn"></i></div>
+          <p class="text-xs uppercase tracking-[0.2em] text-blue-300 font-bold">For Businesses</p>
+          <h2 class="text-2xl sm:text-3xl font-bold font-heading text-white mt-2">Have a campaign brief?</h2>
+          <p class="max-w-2xl mx-auto text-sm text-slate-400 mt-3">Tell us what you need. TaskPe can help coordinate real users for structured testing, feedback, research, and data tasks.</p>
+          <button type="button" onclick="openCampaignRequestModal()" class="mt-6 px-6 py-3 rounded-xl border border-blue-400/50 text-blue-200 hover:bg-blue-500/15 font-bold text-sm transition">Request a Campaign</button>
+        </div>
+
+        <!-- FAQ -->
         <div class="py-12 border-t border-slate-800/80 text-left max-w-3xl mx-auto">
-          <h2 class="text-2xl font-bold font-heading text-white text-center mb-8">Frequently Asked Questions</h2>
+          <h2 class="text-2xl font-bold font-heading text-white text-center mb-8">Frequently asked questions</h2>
           <div class="space-y-4">
-            <div class="glass-card p-4 rounded-xl">
-              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> How do I receive my earnings?</h4>
-              <p class="text-xs text-slate-400">Earnings are credited immediately upon admin proof approval. You can request a payout anytime to your UPI ID (Google Pay, PhonePe, Paytm, or BHIM). The current minimum is shown in the withdrawal form.</p>
-            </div>
-            <div class="glass-card p-4 rounded-xl">
-              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> Does TaskPe charge any registration fees?</h4>
-              <p class="text-xs text-slate-400">No, TaskPe is 100% free forever. We never ask for any deposits, fees, or commissions from earners.</p>
-            </div>
-            <div class="glass-card p-4 rounded-xl">
-              <h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i> What kind of proof is required?</h4>
-              <p class="text-xs text-slate-400">A clear screenshot of your WhatsApp chat screen showing the sent promotional message and recipient numbers with message delivered indicators (double ticks).</p>
-            </div>
+            <div class="glass-card p-4 rounded-xl"><h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i>Is TaskPe only for WhatsApp work?</h4><p class="text-xs text-slate-400">No. WhatsApp tasks remain supported, alongside other microtask and consumer research categories that may be available on the platform.</p></div>
+            <div class="glass-card p-4 rounded-xl"><h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i>How do earners get started?</h4><p class="text-xs text-slate-400">Create an account, open the task list, choose an available task, and follow its instructions. Requirements and rewards are task-specific.</p></div>
+            <div class="glass-card p-4 rounded-xl"><h4 class="font-semibold text-white text-sm mb-1"><i class="fa-solid fa-circle-question text-emerald-400 mr-2"></i>How do businesses request work?</h4><p class="text-xs text-slate-400">Share your campaign brief with the TaskPe team and we can discuss structured testing, feedback, research, and data tasks.</p></div>
           </div>
         </div>
 
+        <!-- Kept for app.js compatibility; the old public earnings claim is intentionally removed. -->
+        <div id="homepage-calculator-compat" class="hidden" aria-hidden="true"><span id="calc-tasks-label"></span><span id="calc-daily-earning"></span><span id="calc-monthly-earning"></span></div>
       </div>
     </section>
 
@@ -361,7 +346,7 @@
             Available WhatsApp Tasks
             <span id="tasks-count-badge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold border border-emerald-500/30">5 Tasks</span>
           </h2>
-          <p class="text-xs text-slate-400 mt-1">Select a task, forward message templates, submit proof, and earn instant cash.</p>
+          <p class="text-xs text-slate-400 mt-1">Showing: <span id="task-category-selection" class="font-semibold text-emerald-400">All Tasks</span> · Select a task, forward message templates, submit proof, and earn instant cash.</p>
         </div>
 
         <!-- Filter Chips -->
@@ -917,8 +902,18 @@
 
   </main>
 
-  <!-- MOBILE PRIMARY NAVIGATION -->
-  <nav id="mobile-bottom-nav" class="md:hidden fixed inset-x-0 bottom-0 z-40 bg-slate-950/95 border-t border-slate-800 backdrop-blur-lg pb-[env(safe-area-inset-bottom)]" aria-label="Primary navigation">
+  <!-- MOBILE PUBLIC NAVIGATION -->
+  <nav id="mobile-public-nav" class="md:hidden {% if session.get('user_id') %}hidden {% endif %}fixed inset-x-0 bottom-0 z-40 bg-slate-950/95 border-t border-slate-800 backdrop-blur-lg pb-[env(safe-area-inset-bottom)]" aria-label="Public homepage navigation"{% if session.get('user_id') %} style="display: none;"{% endif %}>
+    <div class="grid grid-cols-4 max-w-lg mx-auto">
+      <a href="#view-home" class="mobile-nav-btn"><i class="fa-solid fa-house"></i><span>Home</span></a>
+      <a href="#how-it-works" class="mobile-nav-btn"><i class="fa-solid fa-route"></i><span>How It Works</span></a>
+      <a href="#business-contact" class="mobile-nav-btn"><i class="fa-solid fa-building"></i><span>Businesses</span></a>
+      <a href="#task-categories" class="mobile-nav-btn"><i class="fa-solid fa-layer-group"></i><span>Categories</span></a>
+    </div>
+  </nav>
+
+  <!-- MOBILE ACCOUNT NAVIGATION -->
+  <nav id="mobile-account-nav" class="md:hidden {% if not session.get('user_id') %}hidden {% endif %}fixed inset-x-0 bottom-0 z-40 bg-slate-950/95 border-t border-slate-800 backdrop-blur-lg pb-[env(safe-area-inset-bottom)]" aria-label="Account navigation"{% if not session.get('user_id') %} style="display: none;"{% endif %}>
     <div class="grid grid-cols-5 max-w-lg mx-auto">
       <button onclick="navigate('home')" id="mobile-nav-home" class="mobile-nav-btn" aria-label="Home"><i class="fa-solid fa-house"></i><span>Home</span></button>
       <button onclick="navigate('tasks')" id="mobile-nav-tasks" class="mobile-nav-btn" aria-label="Tasks"><i class="fa-solid fa-list-check"></i><span>Tasks</span></button>
@@ -927,6 +922,36 @@
       <button onclick="openMobileProfile()" id="mobile-nav-profile" class="mobile-nav-btn" aria-label="Profile"><i class="fa-solid fa-user"></i><span>Profile</span></button>
     </div>
   </nav>
+
+  <!-- ============================================== -->
+  <!-- MODAL: BUSINESS CAMPAIGN REQUEST                -->
+  <!-- ============================================== -->
+  <div id="modal-campaign-request" class="hidden fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-4 modal-backdrop">
+    <div class="glass-card bg-slate-900 border border-slate-800 w-full max-w-2xl rounded-3xl p-6 sm:p-8 shadow-2xl relative">
+      <button type="button" onclick="closeCampaignRequestModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white transition" aria-label="Close campaign request form"><i class="fa-solid fa-xmark text-lg"></i></button>
+      <div id="campaign-request-success" class="hidden py-8 text-center">
+        <div class="w-14 h-14 mx-auto rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center text-2xl mb-4"><i class="fa-solid fa-check"></i></div>
+        <h2 class="text-xl font-bold text-white">Request received</h2>
+        <p class="text-sm text-slate-400 mt-2">Thanks! Your campaign request has been submitted. The TaskPe team will review your requirements and contact you shortly.</p>
+        <button type="button" onclick="closeCampaignRequestModal()" class="mt-6 px-5 py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm">Close</button>
+      </div>
+      <form id="form-campaign-request" onsubmit="submitCampaignRequest(event)" class="space-y-4">
+        <div class="pr-8"><h2 class="text-2xl font-bold font-heading text-white">Request a Campaign</h2><p class="text-sm text-slate-400 mt-2">Tell us about your campaign. Our team will review your requirements and contact you to discuss the next steps.</p></div>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <label class="text-xs font-medium text-slate-300">Company / Business Name *<input name="company_name" required maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Contact Person *<input name="contact_person" required maxlength="120" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Email *<input name="email" type="email" required maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Phone / WhatsApp<input name="phone" type="tel" maxlength="40" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Task Type *<select name="task_type" required class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"><option value="">Select a task type</option><option>App & Website Testing</option><option>Customer Feedback</option><option>Survey / Market Research</option><option>Search / Data Research</option><option>Local Business Research</option><option>Data / AI Task</option><option>WhatsApp Campaign</option><option>Other</option></select></label>
+          <label class="text-xs font-medium text-slate-300">Target Location<input name="target_location" maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Approximate Participants<input name="participant_count" type="number" min="0" step="1" inputmode="numeric" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Estimated Budget (optional)<input name="estimated_budget" maxlength="80" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+        </div>
+        <label class="block text-xs font-medium text-slate-300">Campaign Description *<textarea name="campaign_description" required maxlength="4000" rows="4" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></textarea></label>
+        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2"><button type="button" onclick="closeCampaignRequestModal()" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm">Cancel</button><button type="submit" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm">Submit Campaign Request</button></div>
+      </form>
+    </div>
+  </div>
 
   <!-- ============================================== -->
   <!-- MODAL: AUTH (LOGIN / SIGNUP / OTP)             -->
@@ -1277,15 +1302,15 @@
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
       <div class="flex items-center gap-2">
         <div class="w-6 h-6 rounded-lg bg-emerald-600 flex items-center justify-center text-white text-xs">
-          <i class="fa-brands fa-whatsapp"></i>
+          <i class="fa-solid fa-layer-group"></i>
         </div>
         <span class="font-bold text-white font-heading">TaskPe</span>
-        <span class="text-slate-400">— WhatsApp Task Earning Platform</span>
+        <span class="text-slate-400">— Microtasks & Consumer Research Platform</span>
       </div>
       <div class="flex items-center space-x-4 text-slate-400">
-        <span>Instant UPI Payouts</span>
+        <span>Structured Tasks</span>
         <span>•</span>
-        <span>Zero Joining Fee</span>
+        <span>Proof-Based Review</span>
         <span>•</span>
         <span>Verified Business Campaigns</span>
       </div>

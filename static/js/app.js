@@ -12,6 +12,8 @@ let submissionProofUrls = {};
 let activeLightboxProofs = [];
 let passwordResetToken = null;
 let passwordResetChallenge = null;
+let activeTaskCategory = 'all';
+let campaignRequestInFlight = false;
 
 // ================= INITIALIZATION =================
 document.addEventListener('DOMContentLoaded', async () => {
@@ -67,7 +69,10 @@ function navigate(viewName, params = {}) {
   }
 
   // Trigger view data loaders
-  if (viewName === 'tasks') loadTasks();
+  if (viewName === 'tasks') {
+    if (Object.prototype.hasOwnProperty.call(params, 'category')) activeTaskCategory = params.category || 'all';
+    loadTasks();
+  }
   if (viewName === 'wallet') loadWalletData();
   if (viewName === 'admin') loadAdminData();
   if (viewName === 'refer') loadReferralData();
@@ -106,6 +111,7 @@ function renderUserLoggedIn() {
   currentUser.role = String(currentUser.role || 'user');
   document.getElementById('auth-buttons-logged-out').classList.add('hidden');
   document.getElementById('auth-buttons-logged-in').classList.remove('hidden');
+  setHomeNavigationVisibility(true);
   document.getElementById('earner-stats-strip').classList.remove('hidden');
 
   // Update navbar wallet & user info
@@ -131,8 +137,26 @@ function renderUserLoggedIn() {
 function renderUserLoggedOut() {
   document.getElementById('auth-buttons-logged-out').classList.remove('hidden');
   document.getElementById('auth-buttons-logged-in').classList.add('hidden');
+  setHomeNavigationVisibility(false);
   document.getElementById('nav-admin').classList.add('hidden');
   document.getElementById('earner-stats-strip').classList.add('hidden');
+}
+
+function setHomeNavigationVisibility(isLoggedIn) {
+  const publicLinks = document.getElementById('public-home-links');
+  const accountLinks = document.getElementById('account-home-links');
+  const mobilePublicLinks = document.getElementById('mobile-public-nav');
+  const mobileAccountLinks = document.getElementById('mobile-account-nav');
+  publicLinks.style.display = isLoggedIn ? 'none' : '';
+  accountLinks.style.display = isLoggedIn ? '' : 'none';
+  mobilePublicLinks.style.display = isLoggedIn ? 'none' : '';
+  mobileAccountLinks.style.display = isLoggedIn ? '' : 'none';
+  publicLinks.classList.toggle('hidden', isLoggedIn);
+  publicLinks.classList.toggle('md:flex', !isLoggedIn);
+  accountLinks.classList.toggle('hidden', !isLoggedIn);
+  accountLinks.classList.toggle('md:flex', isLoggedIn);
+  mobilePublicLinks.classList.toggle('hidden', isLoggedIn);
+  mobileAccountLinks.classList.toggle('hidden', !isLoggedIn);
 }
 
 async function handleLoginSubmit(e) {
@@ -458,6 +482,47 @@ function closeUserDropdown() {
   if (menu) menu.classList.add('hidden');
 }
 
+function openCampaignRequestModal() {
+  const modal = document.getElementById('modal-campaign-request');
+  const form = document.getElementById('form-campaign-request');
+  const success = document.getElementById('campaign-request-success');
+  if (!modal || !form || !success) return;
+  form.classList.remove('hidden');
+  success.classList.add('hidden');
+  modal.classList.remove('hidden');
+  document.body.classList.add('modal-open');
+}
+
+function closeCampaignRequestModal() {
+  const modal = document.getElementById('modal-campaign-request');
+  if (modal) modal.classList.add('hidden');
+  document.body.classList.remove('modal-open');
+}
+
+async function submitCampaignRequest(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (campaignRequestInFlight || !form.reportValidity()) return;
+  const submitButton = form.querySelector('button[type="submit"]');
+  campaignRequestInFlight = true;
+  if (submitButton) { submitButton.disabled = true; submitButton.textContent = 'Submitting…'; }
+  const payload = Object.fromEntries(new FormData(form).entries());
+  try {
+    const response = await fetch('/api/campaign-inquiries', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to submit campaign request.');
+    form.classList.add('hidden');
+    document.getElementById('campaign-request-success').classList.remove('hidden');
+  } catch (error) {
+    showToast(error.message || 'Unable to submit campaign request.', 'error');
+  } finally {
+    campaignRequestInFlight = false;
+    if (submitButton) { submitButton.disabled = false; submitButton.textContent = 'Submit Campaign Request'; }
+  }
+}
+
 // ================= TASK CATALOG =================
 async function loadTasks() {
   try {
@@ -465,8 +530,7 @@ async function loadTasks() {
     const data = await res.json();
     if (data.success) {
       currentTasks = data.tasks;
-      renderTasksGrid(currentTasks);
-      document.getElementById('tasks-count-badge').innerText = `${currentTasks.length} Tasks`;
+      filterTasks(activeTaskCategory, false);
 
       // Update earner stats if logged in
       if (currentUser) {
@@ -483,7 +547,17 @@ async function loadTasks() {
   }
 }
 
-function filterTasks(cat) {
+function taskMatchesMarketingCategory(task, category) {
+  if (category === 'all') return true;
+  const rawValues = [task.category, task.marketing_category, task.task_category]
+    .filter(Boolean).map(value => String(value).trim().toLowerCase());
+  if (category === 'WhatsApp Tasks') return task.task_type === 'TEXT_LINK' || rawValues.some(value => value.includes('whatsapp'));
+  return rawValues.includes(String(category).trim().toLowerCase());
+}
+
+function filterTasks(cat, updateState = true) {
+  if (updateState) activeTaskCategory = cat || 'all';
+  cat = cat || 'all';
   // Update filter buttons UI
   document.querySelectorAll('.filter-btn').forEach(b => {
     b.classList.remove('bg-emerald-500', 'text-slate-950');
@@ -497,9 +571,16 @@ function filterTasks(cat) {
   if (cat === 'all') {
     renderTasksGrid(currentTasks);
   } else {
-    const filtered = currentTasks.filter(t => t.category === cat);
+    const filtered = currentTasks.filter(task => taskMatchesMarketingCategory(task, cat));
     renderTasksGrid(filtered);
   }
+  const badge = document.getElementById('tasks-count-badge');
+  if (badge) {
+    const visibleCount = cat === 'all' ? currentTasks.length : currentTasks.filter(task => taskMatchesMarketingCategory(task, cat)).length;
+    badge.innerText = `${visibleCount} Tasks`;
+  }
+  const selection = document.getElementById('task-category-selection');
+  if (selection) selection.innerText = cat === 'all' ? 'All Tasks' : cat;
 }
 
 function renderTasksGrid(tasks) {
@@ -510,7 +591,7 @@ function renderTasksGrid(tasks) {
     grid.innerHTML = `
       <div class="col-span-full text-center py-12 text-slate-400 glass-card rounded-2xl">
         <i class="fa-solid fa-list-check text-3xl mb-2 text-slate-500"></i>
-        <p>No tasks found in this category.</p>
+        <p>No tasks are currently available in this category.</p>
       </div>
     `;
     return;

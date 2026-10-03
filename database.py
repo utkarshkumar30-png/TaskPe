@@ -22,6 +22,7 @@ REQUIRED_SCHEMA = {
     'target_number_records': {'id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'target_number', 'normalized_target_number', 'status', 'reward_per_number', 'reward_per_number_paise', 'verified_at', 'paid_at', 'paid_amount', 'paid_amount_paise', 'created_at', 'updated_at'},
     'target_payments': {'id', 'target_number_record_id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'submission_id', 'target_number', 'normalized_target_number', 'amount', 'amount_paise', 'rate', 'rate_paise', 'payment_reference', 'paid_at'},
     'message_audit_records': {'id', 'task_id', 'campaign_id', 'assignment_id', 'user_id', 'target_number_record_id', 'recipient_allocation_id', 'recipient_number', 'normalized_recipient_number', 'sender_number', 'message_text', 'status', 'first_opened_at', 'last_opened_at', 'open_count', 'submission_id', 'created_at', 'updated_at'},
+    'campaign_inquiries': {'id', 'company_name', 'contact_person', 'email', 'phone', 'task_type', 'target_location', 'participant_count', 'campaign_description', 'estimated_budget', 'created_at', 'status'},
     'admin_assignment_release_audit': {'id', 'assignment_id', 'admin_user_id', 'worker_user_id', 'task_id', 'old_status', 'new_status', 'reason', 'created_at'},
     'recipient_allocations': {'id', 'campaign_id', 'phone_number', 'assignment_id', 'user_id', 'last_contacted_at', 'status'},
     'submissions': {'id', 'user_id', 'task_id', 'assignment_id', 'proof_image', 'notes', 'status', 'admin_feedback', 'payout_amount', 'audit_badge', 'audit_score', 'numbers_detected', 'numbers_required', 'invalid_count', 'approved_valid_count', 'auto_approved', 'submitted_at', 'reviewed_at', 'required_count', 'verified_count', 'approval_threshold', 'per_number_rate', 'payout_paise', 'per_number_rate_paise'},
@@ -751,6 +752,25 @@ def initialize_database():
             FOREIGN KEY (submission_id) REFERENCES submissions(id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS campaign_inquiries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT NOT NULL,
+            contact_person TEXT NOT NULL,
+            email TEXT NOT NULL,
+            phone TEXT,
+            task_type TEXT NOT NULL,
+            target_location TEXT,
+            participant_count INTEGER,
+            campaign_description TEXT NOT NULL,
+            estimated_budget TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'new'
+                CHECK (status IN ('new', 'contacted', 'closed'))
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS campaign_inquiries_status_created ON campaign_inquiries(status, created_at)')
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS message_audit_assignment_recipient_unique
         ON message_audit_records(assignment_id, normalized_recipient_number)

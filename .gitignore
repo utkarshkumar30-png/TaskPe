@@ -18,6 +18,7 @@ env/
 .env
 .env.*
 !.env.example
+production-notify.env
 
 # SQLite databases, staging copies, backups, and reports
 *.db

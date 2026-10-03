@@ -120,6 +120,7 @@ RATE_LIMIT_RULES = {
     '/api/auth/send-email-verification': (5, 3600),
     '/api/auth/verify-email': (15, 600),
     '/api/auth/register-email': (10, 600),
+    '/api/campaign-inquiries': (5, 600),
     '/api/wallet/withdraw': (5, 600),
 }
 
@@ -848,6 +849,118 @@ def admin_required(f):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/campaign-inquiries', methods=['POST'])
+def create_campaign_inquiry():
+    """Capture a business lead without creating or changing a TaskPe campaign."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'Invalid campaign request.'}), 400
+
+    limits = {
+        'company_name': 160,
+        'contact_person': 120,
+        'email': 160,
+        'phone': 40,
+        'task_type': 64,
+        'target_location': 160,
+        'campaign_description': 4000,
+        'estimated_budget': 80,
+    }
+    required = ('company_name', 'contact_person', 'email', 'task_type', 'campaign_description')
+    text_values = {}
+    for key, limit in limits.items():
+        raw = data.get(key)
+        if raw is None:
+            value = ''
+        elif isinstance(raw, (dict, list, tuple, set, bool)):
+            return jsonify({'success': False, 'message': 'Invalid campaign request.'}), 400
+        else:
+            value = str(raw).strip()
+        if len(value) > limit:
+            return jsonify({'success': False, 'message': f'{key.replace("_", " ").capitalize()} is too long.'}), 400
+        text_values[key] = value
+
+    values = {key: text_values[key] for key in required}
+    if any(not values[key] for key in required):
+        return jsonify({'success': False, 'message': 'Please complete all required fields.'}), 400
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', values['email']):
+        return jsonify({'success': False, 'message': 'Please enter a valid email address.'}), 400
+    allowed_task_types = {
+        'App & Website Testing', 'Customer Feedback', 'Survey / Market Research',
+        'Search / Data Research', 'Local Business Research', 'Data / AI Task',
+        'WhatsApp Campaign', 'Other',
+    }
+    if values['task_type'] not in allowed_task_types:
+        return jsonify({'success': False, 'message': 'Please select a valid task type.'}), 400
+
+    participant_count = data.get('participant_count')
+    if participant_count not in (None, ''):
+        try:
+            if isinstance(participant_count, bool):
+                raise ValueError
+            participant_text = str(participant_count).strip()
+            if len(participant_text) > 7:
+                raise ValueError
+            participant_count = int(participant_count)
+            if participant_count < 0 or participant_count > 1000000:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': 'Participant count must be between 0 and 1000000.'}), 400
+    else:
+        participant_count = None
+
+    conn = database.get_db_connection()
+    try:
+        cursor = conn.execute('''
+            INSERT INTO campaign_inquiries
+                (company_name, contact_person, email, phone, task_type,
+                 target_location, participant_count, campaign_description,
+                 estimated_budget, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+        ''', (
+            values['company_name'], values['contact_person'], values['email'],
+            text_values['phone'] or None, values['task_type'],
+            text_values['target_location'] or None, participant_count,
+            values['campaign_description'], text_values['estimated_budget'] or None,
+        ))
+        conn.commit()
+        inquiry_id = cursor.lastrowid
+    finally:
+        conn.close()
+    return jsonify({'success': True, 'message': 'Thanks! Your campaign request has been submitted. The TaskPe team will review your requirements and contact you shortly.', 'inquiry_id': inquiry_id}), 201
+
+@app.route('/api/admin/campaign-inquiries', methods=['GET'])
+@admin_required
+def admin_campaign_inquiries():
+    conn = database.get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT id, company_name, contact_person, email, phone, task_type,
+                   target_location, participant_count, campaign_description,
+                   estimated_budget, created_at, status
+            FROM campaign_inquiries
+            ORDER BY created_at DESC, id DESC
+        ''').fetchall()
+    finally:
+        conn.close()
+    return jsonify({'success': True, 'inquiries': [dict(row) for row in rows]})
+
+@app.route('/api/admin/campaign-inquiries/<int:inquiry_id>/status', methods=['PATCH'])
+@admin_required
+def update_campaign_inquiry_status(inquiry_id):
+    status = str((request.get_json(silent=True) or {}).get('status') or '').strip().lower()
+    if status not in {'new', 'contacted', 'closed'}:
+        return jsonify({'success': False, 'message': 'Invalid campaign request status.'}), 400
+    conn = database.get_db_connection()
+    try:
+        cursor = conn.execute('UPDATE campaign_inquiries SET status = ? WHERE id = ?', (status, inquiry_id))
+        conn.commit()
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        return jsonify({'success': False, 'message': 'Campaign request not found.'}), 404
+    return jsonify({'success': True, 'message': 'Campaign request status updated.'})
 
 @app.route('/admin')
 @app.route('/admin/')
