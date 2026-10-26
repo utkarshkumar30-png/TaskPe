@@ -264,6 +264,7 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         os.environ["ENVIRONMENT"] = "testing"
         import database as real_db
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         real_db._initialize_database_with_connection(conn)
         conn.close()
 
@@ -476,12 +477,21 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
     def test_post_replacement_failure_triggers_automatic_rollback(self):
         """A failure after Step 5 (e.g. migration error) triggers automatic rollback."""
         mock_py = os.path.join(self.mock_bin, "python3")
+        verify_count = os.path.join(self.test_root, "schema_verify_count")
+        verify_count_p = to_posix_path(verify_count)
         with open(mock_py, "w", encoding="utf-8", newline="\n") as f:
             f.write("#!/bin/sh\n"
+                    f"verify_count=\"{verify_count_p}\"\n"
                     "for arg in \"$@\"; do\n"
                     "  if echo \"$arg\" | grep -q 'database.verify_required_schema'; then\n"
-                    "    echo 'Simulated Schema Verification Error' >&2\n"
-                    "    exit 42\n"
+                    "    count=0\n"
+                    "    if [ -f \"$verify_count\" ]; then count=$(cat \"$verify_count\"); fi\n"
+                    "    count=$((count + 1))\n"
+                    "    echo \"$count\" > \"$verify_count\"\n"
+                    "    if [ \"$count\" -ge 2 ]; then\n"
+                    "      echo 'Simulated Schema Verification Error' >&2\n"
+                    "      exit 42\n"
+                    "    fi\n"
                     "  fi\n"
                     "done\n"
                     "exec /usr/bin/python3 \"$@\"\n")
@@ -493,6 +503,8 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         self.assertIn("Simulated Schema Verification Error", output)
         self.assertIn("Executing automatic rollback to pre-deployment state", output)
         self.assertIn("Automatic rollback succeeded", output)
+        with open(verify_count, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), "2")
 
         with open(os.path.join(self.flask_dir, "app.py"), "r", encoding="utf-8") as f:
             self.assertIn("Old pre-deployment version", f.read())
