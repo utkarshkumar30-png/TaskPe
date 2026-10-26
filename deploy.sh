@@ -231,7 +231,7 @@ RELEASE_FILES=("${FLASK_REPLACE_FILES[@]}" "${WA_REPLACE_FILES[@]}")
 
 EXPECTED_CHECKSUMS="
 b52975ff3a25bbb8f040dcf98e37a75084ee6c08d50b5c3bf54fc9659c352675  app.py
-39b51e61b07b572ec92236f21e41754f78b17ba4c26cbac299be4cc1a6bbadda  database.py
+718abfa6dcbd2571b12bee0fade93909f092338961c8296a2af6947e21b63c1a  database.py
 9dc706fb627755f4735ecb0feaffd364d5f1c4e5da1c0d1f10a594741476038c  server.js
 a13f60b0e7438c1d2c642af7586600c83f71596f62f9e7107409a47c70d6a5be  whatsapp_ledger.js
 aee29fe7db6051b416514f06323851cb901f9161cb1d673d2b6d3fbb24d40b0e  templates/admin.html
@@ -255,7 +255,15 @@ while read -r expected_hash rel_path; do
   [ -f "$full_path" ] && [ -r "$full_path" ] || {
     echo "[ABORT] Required release file missing or unreadable: $full_path"; exit 1;
   }
-  actual_hash=$(sha256sum "$full_path" | awk '{print $1}')
+  actual_hash=$("$FLASK_PYTHON" -c '
+import hashlib
+from pathlib import Path
+import sys
+
+data = Path(sys.argv[1]).read_bytes()
+data = data.replace(bytes((13, 10)), bytes((10,))).replace(bytes((13,)), bytes((10,)))
+print(hashlib.sha256(data).hexdigest())
+' "$full_path")
   if [ "$actual_hash" != "$expected_hash" ]; then
     echo "[ABORT] Checksum mismatch for $rel_path:"
     echo "  Expected: $expected_hash"

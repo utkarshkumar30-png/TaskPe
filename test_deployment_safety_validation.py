@@ -37,16 +37,14 @@ def to_posix_path(win_path):
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        while True:
-            chunk = f.read(65536)
-            if not chunk:
-                break
-            h.update(chunk)
+        data = f.read()
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    h.update(data)
     return h.hexdigest()
 
 EXPECTED_CANDIDATE_CHECKSUMS = {
     "app.py": "b52975ff3a25bbb8f040dcf98e37a75084ee6c08d50b5c3bf54fc9659c352675",
-    "database.py": "39b51e61b07b572ec92236f21e41754f78b17ba4c26cbac299be4cc1a6bbadda",
+    "database.py": "718abfa6dcbd2571b12bee0fade93909f092338961c8296a2af6947e21b63c1a",
     "server.js": "9dc706fb627755f4735ecb0feaffd364d5f1c4e5da1c0d1f10a594741476038c",
     "whatsapp_ledger.js": "a13f60b0e7438c1d2c642af7586600c83f71596f62f9e7107409a47c70d6a5be",
     "templates/admin.html": "aee29fe7db6051b416514f06323851cb901f9161cb1d673d2b6d3fbb24d40b0e",
@@ -75,6 +73,24 @@ def extract_checksum_allowlist(script):
     return result
 
 class TestDeploymentSafetyValidation(unittest.TestCase):
+
+    def test_checksum_canonicalization_is_line_ending_independent(self):
+        lf = b"first\nsecond\n"
+        crlf = b"first\r\nsecond\r\n"
+        standalone_cr = b"first\rsecond\r"
+
+        def canonical_hash(data):
+            normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            return hashlib.sha256(normalized).hexdigest()
+
+        self.assertEqual(canonical_hash(lf), canonical_hash(crlf))
+        self.assertEqual(canonical_hash(lf), canonical_hash(standalone_cr))
+        self.assertNotEqual(canonical_hash(lf), canonical_hash(b"first\nchanged\n"))
+
+        with open(DEPLOY_SH, "r", encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("replace(bytes((13, 10)), bytes((10,)))", script)
+        self.assertIn("replace(bytes((13,)), bytes((10,)))", script)
 
     def test_candidate_allowlist_matches_exact_candidate_files_and_hashes(self):
         with open(DEPLOY_SH, "r", encoding="utf-8") as f:
