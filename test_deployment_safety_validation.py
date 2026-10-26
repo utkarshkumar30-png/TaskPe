@@ -20,6 +20,7 @@ import subprocess
 import sqlite3
 import hashlib
 import re
+import shlex
 import unittest
 
 WORKSPACE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -177,8 +178,7 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
             self.assertIn('deployment requires it to remain disabled', res.stdout + res.stderr)
             with open(os.path.join(self.flask_dir, 'app.py'), 'r', encoding='utf-8') as f:
                 self.assertIn('Old pre-deployment version', f.read())
-            with open(env_path, 'r', encoding='utf-8') as f:
-                self.assertIn(f'{flag_name}=true', f.read())
+            with open(env_path, 'r', encoding='utf-8') as f:                self.assertIn(f'{flag_name}=true', f.read())
             with open(env_path, 'r', encoding='utf-8') as f:
                 original = f.read().replace(f'{flag_name}=true\n', '')
             with open(env_path, 'w', encoding='utf-8', newline='\n') as f:
@@ -187,15 +187,18 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
     def setUp(self):
         # Deployment tests intentionally point the imported database module at
         # a disposable database. Restore both process globals even when a
-        # test or its cleanup raises.
-        import database as real_db
-        self._real_db = real_db
-        self._saved_db_path = real_db.DB_PATH
+        # test or its cleanup raises, and do not leave a newly imported module
+        # cached for unrelated tests.
+        self._database_module_was_loaded = "database" in sys.modules
+        self._previous_database_module = sys.modules.get("database")
+        self._saved_db_path = getattr(self._previous_database_module, "DB_PATH", None)
         self._saved_env = {
             key: os.environ.get(key)
             for key in ('TASKPE_DB_PATH', 'ENVIRONMENT')
         }
         self.addCleanup(self._restore_process_state)
+        import database as real_db
+        self._real_db = real_db
         self.test_root = tempfile.mkdtemp(prefix="taskpe_deploy_test_")
         self.mock_bin = os.path.join(self.test_root, "bin")
         os.makedirs(self.mock_bin, exist_ok=True)
@@ -262,11 +265,13 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         self.db_path = os.path.join(self.flask_dir, "taskpe.db")
         os.environ["TASKPE_DB_PATH"] = self.db_path
         os.environ["ENVIRONMENT"] = "testing"
-        import database as real_db
+        real_db.DB_PATH = os.path.abspath(self.db_path)
+        real_db.initialize_database()
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        real_db._initialize_database_with_connection(conn)
-        conn.close()
+        try:
+            real_db.verify_required_schema(conn)
+        finally:
+            conn.close()
 
         # Scripts copies
         self.deploy_script = os.path.join(self.test_root, "deploy.sh")
@@ -282,7 +287,11 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         shutil.rmtree(self.test_root, ignore_errors=True)
 
     def _restore_process_state(self):
-        self._real_db.DB_PATH = self._saved_db_path
+        if self._database_module_was_loaded:
+            self._previous_database_module.DB_PATH = self._saved_db_path
+            sys.modules["database"] = self._previous_database_module
+        else:
+            sys.modules.pop("database", None)
         for key, value in self._saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -357,7 +366,6 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         with open(curl_mock, "w", encoding="utf-8", newline="\n") as f:
             f.write("#!/bin/sh\necho '{\"status\": \"ok\", \"service\": \"taskpe\"}'\n")
         os.chmod(curl_mock, 0o755)
-
         # mock sqlite3 using python3
         sqlite_mock = os.path.join(self.mock_bin, "sqlite3")
         with open(sqlite_mock, "w", encoding="utf-8", newline="\n") as f:
@@ -494,7 +502,7 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
                     "    fi\n"
                     "  fi\n"
                     "done\n"
-                    "exec /usr/bin/python3 \"$@\"\n")
+                    f"exec {shlex.quote(to_posix_path(sys.executable))} \"$@\"\n")
         os.chmod(mock_py, 0o755)
 
         res = self._run_script(self.deploy_script, [self.release_dir])
@@ -537,8 +545,7 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         res = self._run_script(self.rollback_script, [rec_path])
         self.assertNotEqual(res.returncode, 0)
 
-    def test_database_restore_guard(self):
-        """Database restore strictly requires 'RESTORE_DATABASE' confirmation."""
+    def test_database_restore_guard(self):        """Database restore strictly requires 'RESTORE_DATABASE' confirmation."""
         rec_path = os.path.join(self.test_root, "db_test.record")
         snap_path = os.path.join(self.test_root, "snapshot.db")
         conn = sqlite3.connect(snap_path)
