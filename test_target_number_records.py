@@ -13,11 +13,16 @@ os.environ['TASKPE_UPLOAD_FOLDER'] = os.path.join(_ROOT, 'proofs')
 os.environ['TASKPE_TASK_ASSET_FOLDER'] = os.path.join(_ROOT, 'assets')
 
 import database
+# This module imports the production-mode app before unittest setUp runs.
+# Create only this disposable schema before that import so app startup does
+# not inspect a missing path left by another test module.
+database.init_db()
 from app import finalize_target_records_for_approval, get_reusable_target_numbers
 
 
 class TargetNumberRecordTests(unittest.TestCase):
     def setUp(self):
+        self._open_connections = []
         database.DB_PATH = os.path.join(_ROOT, 'targets.db')
         if os.path.exists(database.DB_PATH):
             os.remove(database.DB_PATH)
@@ -43,16 +48,22 @@ class TargetNumberRecordTests(unittest.TestCase):
         self.assignment_id = assignment_id
 
     def tearDown(self):
+        for conn in self._open_connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
         if os.path.exists(database.DB_PATH):
             os.remove(database.DB_PATH)
 
     def _insert_records(self, count=25):
         conn = database.get_db_connection()
+        self._open_connections.append(conn)
         rows = []
         for index in range(count):
             raw = f'+91 98765 {index:05d}'
             rows.append((self.assignment_id, self.task_id, self.task_id, self.user_id, raw,
-                         database.normalize_target_number(raw), 'assigned', 2.5))
+                         database.normalize_legacy_target_number(raw), 'assigned', 2.5))
         conn.executemany('''
             INSERT INTO target_number_records
                 (assignment_id, task_id, campaign_id, user_id, target_number,
@@ -150,6 +161,20 @@ class TargetNumberRecordTests(unittest.TestCase):
         self.assertNotIn('919876500000', reusable)
         old_assignment = conn.execute("SELECT assignment_id FROM target_number_records WHERE status = 'paid' LIMIT 1").fetchone()[0]
         self.assertEqual(old_assignment, self.assignment_id)
+        conn.close()
+
+    def test_reusable_selector_normalizes_e164_and_rejects_short_lookup_keys(self):
+        conn = self._insert_records(1)
+        conn.execute("UPDATE target_number_records SET status = 'remaining' WHERE id = 1")
+        conn.commit()
+        self.assertEqual(
+            get_reusable_target_numbers(conn, candidate_numbers=['+91 98765 00000']),
+            ['919876500000'],
+        )
+        self.assertEqual(
+            get_reusable_target_numbers(conn, candidate_numbers=['12345']),
+            [],
+        )
         conn.close()
 
     def test_remaining_target_bypasses_cooldown(self):

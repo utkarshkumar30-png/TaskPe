@@ -78,6 +78,9 @@
 
         <!-- Right User Actions -->
         <div class="flex items-center gap-3">
+          <a href="https://t.me/mytaskpe" id="nav-telegram" aria-label="Join Telegram" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold text-sky-300 hover:text-white hover:bg-sky-500/15 transition">
+            <i class="fa-brands fa-telegram"></i><span class="hidden sm:inline">Join Telegram</span>
+          </a>
           <!-- Logged Out View -->
           <div id="auth-buttons-logged-out" class="flex items-center gap-2">
             <button onclick="openAuthModal('login')" class="px-3.5 py-1.5 text-sm font-semibold text-slate-300 hover:text-white transition">
@@ -130,9 +133,12 @@
                 <button onclick="navigate('leaderboard')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
                   <i class="fa-solid fa-trophy text-amber-400 w-4"></i> Leaderboard
                 </button>
-                <button onclick="showToast('For help, contact TaskPe support from your registered email.', 'info')" class="w-full text-left px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                <a href="https://t.me/mytaskpe" target="_blank" rel="noopener noreferrer" class="w-full px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
+                  <i class="fa-brands fa-telegram text-sky-400 w-4"></i> Telegram Channel
+                </a>
+                <a href="https://t.me/Wsbossie" target="_blank" rel="noopener noreferrer" class="w-full px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
                   <i class="fa-solid fa-circle-question text-blue-400 w-4"></i> Help & Support
-                </button>
+                </a>
                 <div class="border-t border-slate-800 my-1"></div>
                 <button onclick="logout()" class="w-full text-left px-4 py-2 text-xs font-medium text-red-400 hover:bg-red-950/40 hover:text-red-300 flex items-center gap-2">
                   <i class="fa-solid fa-arrow-right-from-bracket w-4"></i> Log Out
@@ -206,6 +212,19 @@
             </div>
           </div>
         </div>
+
+        <!-- Telegram announcement -->
+        <a id="telegram-announcement" href="https://t.me/mytaskpe" target="_blank" rel="noopener noreferrer" class="glass-card group flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl p-5 sm:p-6 border-sky-500/30 hover:border-sky-400/70 hover:bg-slate-800/70 transition">
+          <div class="flex items-start gap-4">
+            <div class="w-11 h-11 shrink-0 rounded-2xl bg-sky-500/15 text-sky-400 flex items-center justify-center text-xl"><i class="fa-brands fa-telegram"></i></div>
+            <div>
+              <p class="text-xs uppercase tracking-[0.2em] text-sky-400 font-bold">Telegram Announcement</p>
+              <h2 class="text-lg sm:text-xl font-bold text-white font-heading mt-1">Join the Official TaskPe Telegram</h2>
+              <p class="text-sm text-slate-400 mt-1">Get TaskPe announcements and community updates in one place.</p>
+            </div>
+          </div>
+          <span class="inline-flex items-center gap-2 text-sm font-bold text-sky-300 group-hover:text-white whitespace-nowrap">Join channel <i class="fa-solid fa-arrow-up-right-from-square"></i></span>
+        </a>
 
         <!-- Two audiences -->
         <div class="grid md:grid-cols-2 gap-5 sm:gap-6 py-12 border-t border-slate-800/80">
@@ -281,6 +300,41 @@
     <!-- VIEW 2: TASKS / EARNER DASHBOARD               -->
     <!-- ============================================== -->
     <section id="view-tasks" class="hidden py-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <section id="whatsapp-campaign-discovery" class="glass-card rounded-2xl p-5 mb-8 border border-emerald-500/20" aria-labelledby="whatsapp-campaign-discovery-title">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <p class="text-xs uppercase tracking-wider text-emerald-400 font-bold">Automated campaign availability</p>
+            <h2 id="whatsapp-campaign-discovery-title" class="text-xl font-bold text-white mt-1">WhatsApp campaigns</h2>
+            <p class="text-xs text-slate-400 mt-1">Counts are advisory and may change before a later reservation.</p>
+          </div>
+          <div id="whatsapp-campaign-quota" class="text-sm text-slate-300" aria-live="polite">Checking daily quota…</div>
+        </div>
+        <div id="whatsapp-campaign-discovery-state" class="mt-4 text-sm text-slate-400" aria-live="polite">Loading eligible campaigns…</div>
+        <div id="whatsapp-campaign-list" class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3"></div>
+      </section>
+
+      <section id="whatsapp-connection-card" class="glass-card rounded-2xl p-5 mb-8 border border-slate-700/80" aria-labelledby="whatsapp-connection-title">
+        <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+          <div>
+            <p class="text-xs uppercase tracking-wider text-slate-400 font-bold">Linked device</p>
+            <h2 id="whatsapp-connection-title" class="text-xl font-bold text-white mt-1">WhatsApp connection</h2>
+            <p class="text-xs text-slate-400 mt-1">Connection management is separate from automated campaign sending.</p>
+          </div>
+          <span id="whatsapp-connection-status" class="inline-flex items-center rounded-full border border-slate-700 px-3 py-1 text-xs font-semibold text-slate-300" aria-live="polite">Checking status…</span>
+        </div>
+        <div id="whatsapp-connection-message" class="mt-4 text-sm text-slate-400" aria-live="polite">Checking linked-device availability…</div>
+        <div id="whatsapp-connection-qr" class="hidden mt-4 rounded-xl border border-slate-800 bg-slate-950 p-4">
+          <p class="text-xs font-semibold text-slate-300">Pairing payload</p>
+          <p class="text-[11px] text-slate-500 mt-1">Use only with the dedicated approved test account. This payload is not a message or campaign action.</p>
+          <pre id="whatsapp-connection-qr-value" class="mt-3 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-900 p-3 text-[10px] text-emerald-300"></pre>
+        </div>
+        <div class="mt-4 flex flex-wrap gap-2">
+          <button id="whatsapp-connection-refresh" type="button" onclick="loadWhatsAppConnectionStatus()" class="rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 hover:border-emerald-400">Refresh status</button>
+          <button id="whatsapp-connection-request-qr" type="button" onclick="requestWhatsAppConnectionQr()" class="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-slate-950">Request QR</button>
+          <button id="whatsapp-connection-disconnect" type="button" onclick="disconnectWhatsAppConnection()" class="rounded-lg border border-rose-500/50 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-950/30">Disconnect</button>
+        </div>
+        <p class="mt-3 text-[11px] text-slate-500">Automated campaign sending remains disabled until its separately reviewed safeguards and feature flag are enabled.</p>
+      </section>
       
       <!-- User Summary Cards (When Logged In) -->
       <div id="earner-stats-strip" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -931,24 +985,25 @@
       <button type="button" onclick="closeCampaignRequestModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white transition" aria-label="Close campaign request form"><i class="fa-solid fa-xmark text-lg"></i></button>
       <div id="campaign-request-success" class="hidden py-8 text-center">
         <div class="w-14 h-14 mx-auto rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center text-2xl mb-4"><i class="fa-solid fa-check"></i></div>
-        <h2 class="text-xl font-bold text-white">Request received</h2>
-        <p class="text-sm text-slate-400 mt-2">Thanks! Your campaign request has been submitted. The TaskPe team will review your requirements and contact you shortly.</p>
+        <h2 class="text-xl font-bold text-white">Campaign created</h2>
+        <p class="text-sm text-slate-400 mt-2">Your campaign is persisted with its consent snapshot. Review its current status below; automated WhatsApp sending remains disabled.</p>
         <button type="button" onclick="closeCampaignRequestModal()" class="mt-6 px-5 py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm">Close</button>
       </div>
-      <form id="form-campaign-request" onsubmit="submitCampaignRequest(event)" class="space-y-4">
-        <div class="pr-8"><h2 class="text-2xl font-bold font-heading text-white">Request a Campaign</h2><p class="text-sm text-slate-400 mt-2">Tell us about your campaign. Our team will review your requirements and contact you to discuss the next steps.</p></div>
+      <form id="form-campaign-request" onsubmit="submitBusinessCampaign(event)" class="space-y-4">
+        <div class="pr-8"><h2 class="text-2xl font-bold font-heading text-white">Create a Campaign</h2><p class="text-sm text-slate-400 mt-2">Create a persisted campaign for review and preparation. You must be signed in; automated WhatsApp sending remains disabled.</p></div>
+        <div id="business-campaign-list" class="text-left space-y-2" aria-live="polite"></div>
         <div class="grid sm:grid-cols-2 gap-4">
-          <label class="text-xs font-medium text-slate-300">Company / Business Name *<input name="company_name" required maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Contact Person *<input name="contact_person" required maxlength="120" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Email *<input name="email" type="email" required maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Phone / WhatsApp<input name="phone" type="tel" maxlength="40" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Task Type *<select name="task_type" required class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"><option value="">Select a task type</option><option>App & Website Testing</option><option>Customer Feedback</option><option>Survey / Market Research</option><option>Search / Data Research</option><option>Local Business Research</option><option>Data / AI Task</option><option>WhatsApp Campaign</option><option>Other</option></select></label>
-          <label class="text-xs font-medium text-slate-300">Target Location<input name="target_location" maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Approximate Participants<input name="participant_count" type="number" min="0" step="1" inputmode="numeric" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
-          <label class="text-xs font-medium text-slate-300">Estimated Budget (optional)<input name="estimated_budget" maxlength="80" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Campaign name *<input name="title" required maxlength="160" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">Content type *<select name="task_type" required onchange="toggleBusinessCampaignImage(this.value)" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"><option value="TEXT_LINK">Text + website button</option><option value="IMAGE_TEXT_LINK">Image + text + website button</option></select></label>
+          <label class="text-xs font-medium text-slate-300">HTTPS destination URL *<input name="destination_link" type="url" required placeholder="https://example.com" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
+          <label class="text-xs font-medium text-slate-300">National-number region (optional)<input name="recipient_region" maxlength="2" placeholder="US, GB, IN" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></label>
         </div>
-        <label class="block text-xs font-medium text-slate-300">Campaign Description *<textarea name="campaign_description" required maxlength="4000" rows="4" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></textarea></label>
-        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2"><button type="button" onclick="closeCampaignRequestModal()" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm">Cancel</button><button type="submit" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm">Submit Campaign Request</button></div>
+        <label class="block text-xs font-medium text-slate-300">Message text *<textarea name="template_text" required maxlength="4000" rows="3" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></textarea></label>
+        <label class="block text-xs font-medium text-slate-300">Recipient numbers *<textarea name="target_numbers" required rows="4" placeholder="One per line, comma-separated, or E.164 (+...)" class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-white"></textarea></label>
+        <label class="hidden text-xs font-medium text-slate-300" id="business-campaign-image-label">Approved image *<input name="campaign_image" type="file" accept=".png,.jpg,.jpeg,.webp" class="mt-1 block w-full text-xs text-slate-300"></label>
+        <label class="flex items-start gap-2 text-xs text-slate-300"><input name="consent_declaration_confirmed" value="1" type="checkbox" required class="mt-0.5"><span>I confirm: “These customers gave us their number at our counter and agreed to receive offers from us on WhatsApp.”</span></label>
+        <p id="business-campaign-status" class="text-xs text-slate-400" aria-live="polite">Your recipient list will be normalized and checked before creation.</p>
+        <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2"><button type="button" onclick="closeCampaignRequestModal()" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm">Cancel</button><button type="button" onclick="previewBusinessCampaignRecipients()" class="px-5 py-2.5 rounded-xl border border-slate-700 text-slate-200 font-semibold text-sm">Preview recipients</button><button type="submit" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm">Create Campaign</button></div>
       </form>
     </div>
   </div>
@@ -1218,6 +1273,18 @@
         <div>
           <label for="newtask-numbers" class="block text-xs font-medium text-slate-300 mb-1">Target Phone Numbers (Comma or newline separated)</label>
           <textarea id="newtask-numbers" rows="3" required placeholder="919811122233, 919822233344, 919833344455" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm font-mono text-white focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <div>
+          <label for="newtask-shop-name" class="block text-xs font-medium text-slate-300 mb-1">Shop / Counter Name</label>
+          <input type="text" id="newtask-shop-name" placeholder="Billing Counter / Store Name" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        </div>
+
+        <div class="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
+          <label class="flex items-start gap-2.5 text-xs text-slate-300 cursor-pointer">
+            <input type="checkbox" id="newtask-counter-declaration" required class="mt-0.5 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500">
+            <span>These customers gave us their number at our counter and agreed to receive offers from us on WhatsApp.</span>
+          </label>
         </div>
 
         <div class="grid grid-cols-2 gap-4">

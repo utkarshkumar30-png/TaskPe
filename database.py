@@ -1,10 +1,15 @@
 import sqlite3
 import json
 import os
+import re
+import hashlib
+import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from werkzeug.security import generate_password_hash, check_password_hash
 from money import inr_to_paise
+import phonenumbers
+from phonenumbers.phonenumberutil import NumberParseException
 
 _IS_DEVELOPMENT = os.environ.get('ENVIRONMENT', 'production').strip().lower() == 'development'
 _configured_db_path = os.environ.get('TASKPE_DB_PATH', '').strip()
@@ -17,11 +22,19 @@ DB_PATH = _configured_db_path or os.path.join(os.path.dirname(os.path.abspath(__
 REQUIRED_SCHEMA = {
     'exact_money_settings': {'key', 'value_scaled', 'scale', 'kind', 'migrated_at'},
     'users': {'id', 'name', 'mobile', 'email', 'password_hash', 'role', 'wallet_balance', 'total_earned', 'referral_code', 'referred_by', 'referred_user_task_count', 'signup_method', 'created_at', 'wallet_balance_paise', 'total_earned_paise'},
-    'tasks': {'id', 'title', 'category', 'task_type', 'description', 'payout', 'payout_paise', 'reward_per_number_paise', 'reward_source', 'template_text', 'image_path', 'destination_link', 'target_numbers', 'campaign_id', 'recipients_per_slot', 'time_limit_minutes', 'proof_instructions', 'total_slots', 'completed_slots', 'status', 'created_at'},
+    'tasks': {'id', 'title', 'category', 'task_type', 'description', 'payout', 'payout_paise', 'reward_per_number_paise', 'reward_source', 'template_text', 'image_path', 'destination_link', 'target_numbers', 'recipient_region', 'campaign_id', 'owner_user_id', 'campaign_review_status', 'campaign_approved_by', 'campaign_approved_at', 'campaign_approval_fingerprint', 'recipients_per_slot', 'time_limit_minutes', 'proof_instructions', 'total_slots', 'completed_slots', 'status', 'created_at'},
     'task_assignments': {'id', 'user_id', 'task_id', 'campaign_id', 'campaign_type', 'assigned_numbers', 'status', 'assigned_at', 'started_at', 'expires_at', 'slot_released', 'completed_at'},
     'target_number_records': {'id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'target_number', 'normalized_target_number', 'status', 'reward_per_number', 'reward_per_number_paise', 'verified_at', 'paid_at', 'paid_amount', 'paid_amount_paise', 'created_at', 'updated_at'},
     'target_payments': {'id', 'target_number_record_id', 'assignment_id', 'task_id', 'campaign_id', 'user_id', 'submission_id', 'target_number', 'normalized_target_number', 'amount', 'amount_paise', 'rate', 'rate_paise', 'payment_reference', 'paid_at'},
     'message_audit_records': {'id', 'task_id', 'campaign_id', 'assignment_id', 'user_id', 'target_number_record_id', 'recipient_allocation_id', 'recipient_number', 'normalized_recipient_number', 'sender_number', 'message_text', 'status', 'first_opened_at', 'last_opened_at', 'open_count', 'submission_id', 'created_at', 'updated_at'},
+    'whatsapp_campaign_plans': {'id', 'plan_key', 'request_fingerprint', 'recipient_fingerprint', 'task_id', 'campaign_id', 'sender_worker_id', 'content_reference', 'recipient_count', 'requested_quantity', 'state', 'batch_id', 'batch_request_fingerprint', 'batch_content_type', 'batch_state', 'batch_updated_at', 'dispatch_state', 'dispatch_operation_id', 'dispatch_started_at', 'cancellation_state', 'cancellation_evidence_status', 'cancellation_requested_at', 'cancellation_checked_at', 'created_at'},
+    'whatsapp_campaign_plan_recipients': {'id', 'plan_id', 'recipient_number', 'position', 'idempotency_key', 'state', 'reservation_claim_id', 'reservation_lease_until', 'ledger_message_id', 'failure_code', 'created_at', 'updated_at'},
+    'whatsapp_campaign_recipient_claims': {'id', 'campaign_id', 'task_id', 'recipient_number', 'plan_id', 'plan_recipient_id', 'state', 'created_at', 'updated_at'},
+    'shop_consent_declarations': {'id', 'shop_name', 'uploader_user_id', 'source', 'recipient_count', 'declaration_text', 'created_at'},
+    'recipient_consent_records': {'id', 'phone_number', 'declaration_id', 'status', 'created_at'},
+    'whatsapp_opt_outs': {'id', 'phone_number', 'reason', 'opted_out_at'},
+    'whatsapp_opt_out_operations': {'request_id', 'actor_user_id', 'phone_number', 'reason', 'state', 'created_at', 'updated_at'},
+    'whatsapp_campaign_consent_declarations': {'id', 'task_id', 'campaign_id', 'business_user_id', 'declaration_text', 'normalized_recipient_list', 'recipient_count', 'recipient_fingerprint', 'created_at'},
     'campaign_inquiries': {'id', 'company_name', 'contact_person', 'email', 'phone', 'task_type', 'target_location', 'participant_count', 'campaign_description', 'estimated_budget', 'created_at', 'status'},
     'admin_assignment_release_audit': {'id', 'assignment_id', 'admin_user_id', 'worker_user_id', 'task_id', 'old_status', 'new_status', 'reason', 'created_at'},
     'recipient_allocations': {'id', 'campaign_id', 'phone_number', 'assignment_id', 'user_id', 'last_contacted_at', 'status'},
@@ -46,6 +59,17 @@ REQUIRED_INDEXES = {
     'target_payments_submission_lookup',
     'message_audit_assignment_recipient_unique',
     'message_audit_report_lookup',
+    'whatsapp_campaign_plans_batch_id_unique',
+    'whatsapp_campaign_plan_recipients_lookup',
+    'whatsapp_campaign_plan_recipients_reservation_lookup',
+    'whatsapp_campaign_plan_recipient_ledger_id_unique',
+    'whatsapp_campaign_recipient_claims_lookup',
+    'whatsapp_campaign_recipient_claims_active_unique',
+    'shop_consent_declarations_uploader',
+    'recipient_consent_phone_status',
+    'whatsapp_opt_outs_phone_unique',
+    'whatsapp_opt_out_operations_actor',
+    'whatsapp_campaign_consent_lookup',
     'one_target_payment_per_campaign_number',
     'recipient_allocations_one_active',
     'recipient_allocations_campaign_state',
@@ -60,6 +84,147 @@ REQUIRED_INDEXES = {
     'finance_settings_history_changed_by',
 }
 
+REQUIRED_UNIQUE_INDEXES = {
+    'whatsapp_opt_outs_phone_unique',
+}
+
+REQUIRED_CONSTRAINT_PATTERNS = {
+    'recipient_consent_records': (
+        r"check\s*\(\s*status\s+in\s*\(\s*'shop_attested'\s*,\s*'revoked'\s*\)\s*\)",
+    ),
+    'whatsapp_opt_out_operations': (
+        r"check\s*\(\s*state\s+in\s*\(\s*'pending'\s*,\s*'unknown'\s*,\s*'node_confirmed'\s*,\s*'applied'\s*,\s*'failed'\s*\)\s*\)",
+    ),
+    'whatsapp_campaign_consent_declarations': (
+        r'check\s*\(\s*recipient_count\s*>\s*0\s*\)',
+        r'check\s*\(\s*length\s*\(\s*recipient_fingerprint\s*\)\s*=\s*64\s*\)',
+    ),
+}
+
+WHATSAPP_PLAN_RECIPIENT_KEY_PREFIX = 'taskpe-wa-plan-recipient-v1:'
+WHATSAPP_LEDGER_TOKEN_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$')
+
+
+def whatsapp_campaign_plan_recipient_idempotency_key(plan_id, plan_recipient_id):
+    """Return the canonical fixed-length key shared with the Node ledger."""
+    if (isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1 or
+            isinstance(plan_recipient_id, bool) or not isinstance(plan_recipient_id, int) or
+            plan_recipient_id < 1):
+        raise ValueError('Invalid campaign plan recipient identity.')
+    value = f'{WHATSAPP_PLAN_RECIPIENT_KEY_PREFIX}{plan_id}:{plan_recipient_id}'.encode('utf-8')
+    return hashlib.sha256(value).hexdigest()
+
+
+def is_valid_whatsapp_ledger_token(value):
+    return isinstance(value, str) and bool(WHATSAPP_LEDGER_TOKEN_PATTERN.fullmatch(value))
+
+
+def _whatsapp_ledger_path():
+    configured = os.environ.get('TASKPE_WA_LEDGER_DB_PATH', '').strip()
+    if configured and not os.path.isabs(configured):
+        raise RuntimeError('TASKPE_WA_LEDGER_DB_PATH must be an absolute path.')
+    return configured or os.path.join(tempfile.gettempdir(), 'taskpe-wa-outgoing.sqlite3')
+
+
+def _legacy_ledger_references(old_keys):
+    """Fail closed if a Node ledger still references a key being replaced."""
+    if not old_keys:
+        return
+    path = _whatsapp_ledger_path()
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            'Unable to inspect the WhatsApp ledger before legacy key migration: database file is unavailable.'
+        )
+    uri = 'file:' + path.replace('\\', '/') + '?mode=ro'
+    ledger = None
+    try:
+        ledger = sqlite3.connect(uri, uri=True)
+        table = ledger.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_messages'"
+        ).fetchone()
+        if not table:
+            raise RuntimeError(
+                'Unable to inspect the WhatsApp ledger before legacy key migration: outgoing_messages table is missing.'
+            )
+        placeholders = ','.join('?' for _ in old_keys)
+        query = f'''
+            SELECT 1 FROM outgoing_messages
+            WHERE idempotency_key IN ({placeholders})
+            LIMIT 1
+        '''
+        if ledger.execute(query, tuple(old_keys)).fetchone():
+            raise RuntimeError(
+                'Unable to migrate legacy campaign keys: Node ledger outgoing_messages contains active references to old keys.'
+            )
+    finally:
+        if ledger:
+            ledger.close()
+
+
+def _duplicate_campaign_ledger_message_ids(conn):
+    return conn.execute('''
+        SELECT ledger_message_id, COUNT(*) AS count
+        FROM whatsapp_campaign_plan_recipients
+        WHERE ledger_message_id IS NOT NULL
+        GROUP BY ledger_message_id
+        HAVING COUNT(*) > 1
+    ''').fetchall()
+
+
+def migrate_whatsapp_campaign_plan_identity(conn):
+    """Backfill canonical keys and install ledger-ID integrity guards.
+
+    This runs inside the caller's initialization transaction. It never deletes
+    or rewrites plan identities, positions, recipients, or ledger rows.
+    """
+    duplicate_ids = _duplicate_campaign_ledger_message_ids(conn)
+    if duplicate_ids:
+        raise RuntimeError(
+            'Duplicate non-null WhatsApp ledger message IDs exist; resolve them before initialization.'
+        )
+    rows = conn.execute('''
+        SELECT id, plan_id, idempotency_key
+        FROM whatsapp_campaign_plan_recipients
+        ORDER BY id
+    ''').fetchall()
+    replacements = []
+    old_keys = []
+    for row in rows:
+        expected = whatsapp_campaign_plan_recipient_idempotency_key(row['plan_id'], row['id'])
+        if row['idempotency_key'] != expected:
+            replacements.append((expected, row['id']))
+            old_keys.append(row['idempotency_key'])
+    _legacy_ledger_references(old_keys)
+    for expected, row_id in replacements:
+        conn.execute('''
+            UPDATE whatsapp_campaign_plan_recipients
+            SET idempotency_key = ?
+            WHERE id = ?
+        ''', (expected, row_id))
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_campaign_plan_recipient_ledger_id_unique
+        ON whatsapp_campaign_plan_recipients(ledger_message_id)
+        WHERE ledger_message_id IS NOT NULL
+    ''')
+
+
+def migrate_legacy_business_campaign_review_state(conn):
+    """Quarantine legacy business campaigns until a real review succeeds.
+
+    Ownership comes from the persisted owner relationship and business role.
+    This additive, guarded update creates no consent, fingerprint, approver,
+    or timestamp and is safe to repeat.
+    """
+    cursor = conn.execute('''
+        UPDATE tasks
+        SET status = 'pending_review', campaign_review_status = 'pending_review'
+        WHERE status = 'active'
+          AND campaign_review_status = 'not_required'
+          AND owner_user_id IS NOT NULL
+          AND owner_user_id IN (SELECT id FROM users WHERE role = 'business')
+    ''')
+    return cursor.rowcount
+
 REQUIRED_TRIGGERS = {
     'paid_target_record_immutable_update',
     'paid_target_record_immutable_delete',
@@ -69,9 +234,52 @@ REQUIRED_TRIGGERS = {
     'finance_settings_history_no_delete',
 }
 
-def normalize_target_number(value):
-    """Use the project's canonical phone normalization for target records."""
+def normalize_legacy_target_number(value):
+    """Return the historical digit-only storage key for legacy target rows."""
     return ''.join(character for character in str(value or '') if character.isdigit())
+
+
+def normalize_target_number(value, region=None):
+    """Return the canonical, validated E.164 representation of a number."""
+    return normalize_recipient_number(value, region=region)
+
+
+def validate_phone_region(region):
+    """Return an explicit libphonenumber region or reject missing/unknown input."""
+    if region is None or not isinstance(region, str) or not region.strip():
+        return None
+    normalized = region.strip().upper()
+    if normalized not in phonenumbers.SUPPORTED_REGIONS:
+        raise ValueError('Unsupported phone-number region.')
+    return normalized
+
+
+def normalize_recipient_number(value, region=None):
+    """Normalize a recipient to E.164 without guessing a national region.
+
+    International ``+`` and ``00`` forms carry their own country code. National
+    forms require an explicit ISO-3166-1 alpha-2 region. Existing stored values
+    are not rewritten by this API; callers should fail closed when they cannot
+    be interpreted unambiguously.
+    """
+    raw = str(value or '').strip()
+    if not raw:
+        raise ValueError('A recipient phone number is required.')
+    explicit_region = validate_phone_region(region)
+    try:
+        if raw.startswith('00'):
+            parsed = phonenumbers.parse('+' + raw[2:], None)
+        elif raw.startswith('+'):
+            parsed = phonenumbers.parse(raw, None)
+        else:
+            if not explicit_region:
+                raise ValueError('An explicit phone-number region is required for national format.')
+            parsed = phonenumbers.parse(raw, explicit_region)
+        if not phonenumbers.is_possible_number(parsed) or not phonenumbers.is_valid_number(parsed):
+            raise ValueError('Invalid recipient phone number.')
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except NumberParseException as exc:
+        raise ValueError('Invalid recipient phone number.') from exc
 
 def is_development_environment():
     """Only an explicit development setting may create sample credentials/data."""
@@ -81,6 +289,69 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def schema_problems(conn):
+    """Return precise schema gaps without creating or changing anything."""
+    actual_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    missing_tables = sorted(set(REQUIRED_SCHEMA) - actual_tables)
+    missing_columns = []
+    for table, required_columns in REQUIRED_SCHEMA.items():
+        if table not in actual_tables:
+            continue
+        actual_columns = {
+            row[1] for row in conn.execute(f'PRAGMA table_info({table})')
+        }
+        for column in sorted(required_columns - actual_columns):
+            missing_columns.append(f'{table}.{column}')
+
+    actual_indexes = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL"
+        )
+    }
+    missing_indexes = sorted(REQUIRED_INDEXES - actual_indexes)
+    non_unique_indexes = []
+    for index_name in sorted(REQUIRED_UNIQUE_INDEXES & actual_indexes):
+        # Resolve the owning table directly; PRAGMA index_list does not expose it.
+        owner = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (index_name,),
+        ).fetchone()
+        if owner:
+            for row in conn.execute('PRAGMA index_list(' + repr(owner[0]) + ')').fetchall():
+                if row[1] == index_name and not row[2]:
+                    non_unique_indexes.append(index_name)
+    actual_triggers = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    missing_triggers = sorted(REQUIRED_TRIGGERS - actual_triggers)
+    missing_constraints = []
+    for table, patterns in REQUIRED_CONSTRAINT_PATTERNS.items():
+        if table not in actual_tables:
+            continue
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        sql = re.sub(r'\s+', ' ', (row[0] if row else '').lower())
+        for pattern in patterns:
+            if not re.search(pattern, sql):
+                missing_constraints.append(f'{table}: {pattern}')
+    return {
+        'tables': missing_tables,
+        'columns': missing_columns,
+        'indexes': missing_indexes,
+        'non_unique_indexes': sorted(non_unique_indexes),
+        'triggers': missing_triggers,
+        'constraints': missing_constraints,
+    }
 
 
 def verify_required_schema(conn=None):
@@ -93,43 +364,10 @@ def verify_required_schema(conn=None):
     owns_connection = conn is None
     connection = conn or get_db_connection()
     try:
-        actual_tables = {
-            row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        missing_tables = sorted(set(REQUIRED_SCHEMA) - actual_tables)
-        missing_columns = []
-        for table, required_columns in REQUIRED_SCHEMA.items():
-            if table not in actual_tables:
-                continue
-            actual_columns = {
-                row[1] for row in connection.execute(f'PRAGMA table_info({table})')
-            }
-            for column in sorted(required_columns - actual_columns):
-                missing_columns.append(f'{table}.{column}')
-
-        actual_indexes = {
-            row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL"
-            )
-        }
-        actual_triggers = {
-            row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
-            )
-        }
-        missing_indexes = sorted(REQUIRED_INDEXES - actual_indexes)
-        missing_triggers = sorted(REQUIRED_TRIGGERS - actual_triggers)
         problems = []
-        if missing_tables:
-            problems.append('tables: ' + ', '.join(missing_tables))
-        if missing_columns:
-            problems.append('columns: ' + ', '.join(missing_columns))
-        if missing_indexes:
-            problems.append('indexes: ' + ', '.join(missing_indexes))
-        if missing_triggers:
-            problems.append('triggers: ' + ', '.join(missing_triggers))
+        for kind, values in schema_problems(connection).items():
+            if values:
+                problems.append(f'{kind}: ' + ', '.join(values))
         if problems:
             raise RuntimeError(
                 'Database schema is incomplete; run the documented explicit '
@@ -233,6 +471,7 @@ def ensure_task_type_and_reward_fields(conn):
         'task_type': 'TEXT',
         'image_path': 'TEXT',
         'destination_link': 'TEXT',
+        'recipient_region': 'TEXT',
         'reward_per_number_paise': 'INTEGER',
         'reward_source': "TEXT DEFAULT 'legacy_snapshot'",
     }
@@ -326,8 +565,7 @@ def ensure_recipient_allocation_history(conn):
                     AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.assignment_id = ta.id)
               )
         ''')
-def initialize_database():
-    conn = get_db_connection()
+def _initialize_database_with_connection(conn):
     cursor = conn.cursor()
 
     # Exact-money settings are maintained alongside the legacy text settings.
@@ -388,7 +626,13 @@ def initialize_database():
             image_path TEXT,
             destination_link TEXT,
             target_numbers TEXT NOT NULL,
+            recipient_region TEXT,
             campaign_id INTEGER,
+            owner_user_id INTEGER,
+            campaign_review_status TEXT NOT NULL DEFAULT 'not_required',
+            campaign_approved_by INTEGER,
+            campaign_approved_at DATETIME,
+            campaign_approval_fingerprint TEXT,
             recipients_per_slot INTEGER NOT NULL DEFAULT 0,
             time_limit_minutes INTEGER NOT NULL DEFAULT 15,
             proof_instructions TEXT NOT NULL,
@@ -398,6 +642,19 @@ def initialize_database():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(tasks)")
+    task_columns = {row[1] for row in cursor.fetchall()}
+    if 'owner_user_id' not in task_columns:
+        cursor.execute('ALTER TABLE tasks ADD COLUMN owner_user_id INTEGER')
+    for column, definition in {
+        'campaign_review_status': "TEXT NOT NULL DEFAULT 'not_required'",
+        'campaign_approved_by': 'INTEGER',
+        'campaign_approved_at': 'DATETIME',
+        'campaign_approval_fingerprint': 'TEXT',
+    }.items():
+        if column not in task_columns:
+            cursor.execute(f'ALTER TABLE tasks ADD COLUMN {column} {definition}')
+    cursor.execute('CREATE INDEX IF NOT EXISTS tasks_owner_status ON tasks(owner_user_id, status, created_at)')
 
     # Each start creates a private assignment.  The partial unique index is the
     # database-level guard that permits one active assignment per user/campaign
@@ -780,6 +1037,225 @@ def initialize_database():
         ON message_audit_records(campaign_id, task_id, user_id, first_opened_at)
     ''')
 
+    # Phase 2: durable, pre-send audience snapshots.  This is deliberately
+    # separate from the Node WhatsApp ledger and stores no message content,
+    # credentials, QR data, or media.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_campaign_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_key TEXT NOT NULL UNIQUE,
+            request_fingerprint TEXT NOT NULL,
+            recipient_fingerprint TEXT,
+            task_id INTEGER NOT NULL,
+            campaign_id INTEGER NOT NULL,
+            sender_worker_id INTEGER NOT NULL,
+            content_reference TEXT NOT NULL,
+            recipient_count INTEGER NOT NULL CHECK (recipient_count > 0),
+            requested_quantity TEXT,
+            state TEXT NOT NULL DEFAULT 'creating'
+                CHECK (state IN ('creating', 'ready', 'cancelled')),
+            batch_id TEXT UNIQUE,
+            batch_request_fingerprint TEXT,
+            batch_content_type TEXT NOT NULL DEFAULT 'text',
+            batch_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK (batch_state IN ('pending', 'reserving', 'reserved', 'unknown', 'failed')),
+            batch_updated_at DATETIME,
+            dispatch_state TEXT NOT NULL DEFAULT 'not_started'
+                CHECK (dispatch_state IN ('not_started', 'in_progress', 'unknown', 'complete')),
+            dispatch_operation_id TEXT,
+            dispatch_started_at DATETIME,
+            cancellation_state TEXT NOT NULL DEFAULT 'not_requested',
+            cancellation_evidence_status TEXT,
+            cancellation_requested_at DATETIME,
+            cancellation_checked_at DATETIME,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (sender_worker_id) REFERENCES users(id)
+        )
+    ''')
+    plan_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(whatsapp_campaign_plans)')
+    }
+    plan_additions = {
+        'batch_id': 'TEXT',
+        'recipient_fingerprint': 'TEXT',
+        'batch_request_fingerprint': 'TEXT',
+        'batch_content_type': "TEXT NOT NULL DEFAULT 'text'",
+        'requested_quantity': 'TEXT',
+        'batch_state': "TEXT NOT NULL DEFAULT 'pending'",
+        'batch_updated_at': 'DATETIME',
+        'dispatch_state': "TEXT NOT NULL DEFAULT 'not_started'",
+        'dispatch_operation_id': 'TEXT',
+        'dispatch_started_at': 'DATETIME',
+        'cancellation_state': "TEXT NOT NULL DEFAULT 'not_requested'",
+        'cancellation_evidence_status': 'TEXT',
+        'cancellation_requested_at': 'DATETIME',
+        'cancellation_checked_at': 'DATETIME',
+    }
+    for column, definition in plan_additions.items():
+        if column not in plan_columns:
+            cursor.execute(f'ALTER TABLE whatsapp_campaign_plans ADD COLUMN {column} {definition}')
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_campaign_plans_batch_id_unique
+        ON whatsapp_campaign_plans(batch_id) WHERE batch_id IS NOT NULL
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_campaign_plan_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            recipient_number TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK (position > 0),
+            idempotency_key TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'planned'
+                CHECK (state IN ('planned', 'reserving', 'reserved', 'attempted', 'acknowledged', 'failed', 'delivered_unknown')),
+            reservation_claim_id TEXT,
+            reservation_lease_until DATETIME,
+            ledger_message_id TEXT,
+            failure_code TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (plan_id, position),
+            UNIQUE (plan_id, recipient_number),
+            FOREIGN KEY (plan_id) REFERENCES whatsapp_campaign_plans(id)
+        )
+    ''')
+    plan_recipient_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(whatsapp_campaign_plan_recipients)')
+    }
+    additions = {
+        'state': "TEXT NOT NULL DEFAULT 'planned'",
+        'reservation_claim_id': 'TEXT',
+        'reservation_lease_until': 'DATETIME',
+        'ledger_message_id': 'TEXT',
+        'failure_code': 'TEXT',
+        'updated_at': 'DATETIME',
+    }
+    for column, definition in additions.items():
+        if column not in plan_recipient_columns:
+            cursor.execute(f'ALTER TABLE whatsapp_campaign_plan_recipients ADD COLUMN {column} {definition}')
+    cursor.execute('''
+        UPDATE whatsapp_campaign_plan_recipients
+        SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)
+        WHERE updated_at IS NULL
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS whatsapp_campaign_plan_recipients_lookup
+        ON whatsapp_campaign_plan_recipients(plan_id, position)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS whatsapp_campaign_plan_recipients_reservation_lookup
+        ON whatsapp_campaign_plan_recipients(state, reservation_lease_until)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_campaign_recipient_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            recipient_number TEXT NOT NULL,
+            plan_id INTEGER NOT NULL,
+            plan_recipient_id INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'claimed'
+                CHECK (state IN ('claimed', 'released')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (plan_id, plan_recipient_id),
+            FOREIGN KEY (plan_id) REFERENCES whatsapp_campaign_plans(id),
+            FOREIGN KEY (plan_recipient_id) REFERENCES whatsapp_campaign_plan_recipients(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS whatsapp_campaign_recipient_claims_lookup
+        ON whatsapp_campaign_recipient_claims(campaign_id, recipient_number, state)
+    ''')
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_campaign_recipient_claims_active_unique
+        ON whatsapp_campaign_recipient_claims(campaign_id, recipient_number)
+        WHERE state = 'claimed'
+    ''')
+    migrate_whatsapp_campaign_plan_identity(conn)
+
+    # Phase 2A: Shop Consent Declarations & Opt-Outs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shop_consent_declarations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shop_name TEXT NOT NULL,
+            uploader_user_id INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'billing_counter',
+            recipient_count INTEGER NOT NULL CHECK (recipient_count > 0),
+            declaration_text TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (uploader_user_id) REFERENCES users(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS shop_consent_declarations_uploader
+        ON shop_consent_declarations(uploader_user_id, created_at)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS recipient_consent_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            declaration_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'shop_attested'
+                CHECK (status IN ('shop_attested', 'revoked')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (declaration_id) REFERENCES shop_consent_declarations(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS recipient_consent_phone_status
+        ON recipient_consent_records(phone_number, status)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_opt_outs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL UNIQUE,
+            reason TEXT NOT NULL DEFAULT 'user_opt_out',
+            opted_out_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_opt_outs_phone_unique
+        ON whatsapp_opt_outs(phone_number)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_opt_out_operations (
+            request_id TEXT PRIMARY KEY,
+            actor_user_id INTEGER NOT NULL,
+            phone_number TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending', 'unknown', 'node_confirmed', 'applied', 'failed')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (actor_user_id) REFERENCES users(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS whatsapp_opt_out_operations_actor
+        ON whatsapp_opt_out_operations(actor_user_id, created_at)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS whatsapp_campaign_consent_declarations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            campaign_id INTEGER NOT NULL,
+            business_user_id INTEGER NOT NULL,
+            declaration_text TEXT NOT NULL,
+            normalized_recipient_list TEXT NOT NULL,
+            recipient_count INTEGER NOT NULL CHECK (recipient_count > 0),
+            recipient_fingerprint TEXT NOT NULL CHECK (length(recipient_fingerprint) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (business_user_id) REFERENCES users(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS whatsapp_campaign_consent_lookup
+        ON whatsapp_campaign_consent_declarations(business_user_id, task_id, campaign_id)
+    ''')
+    migrate_legacy_business_campaign_review_state(conn)
+
     # Settings Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS settings (
@@ -979,14 +1455,11 @@ def initialize_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS email_verifications_email_idx ON email_verifications(email)')
     cursor.execute('CREATE INDEX IF NOT EXISTS email_verifications_expires_idx ON email_verifications(expires_at)')
 
-    conn.commit()
     if is_development_environment():
         seed_data(conn)
     else:
         provision_initial_admin(conn)
     ensure_task_type_and_reward_fields(conn)
-    conn.commit()
-    conn.close()
 
 def provision_initial_admin(conn):
     """Provision an admin only on an empty production install with supplied secrets."""
@@ -1183,6 +1656,238 @@ def seed_data(conn):
     ''', ((datetime.now() - timedelta(minutes=45)).strftime('%Y-%m-%d %H:%M:%S'),))
 
     conn.commit()
+
+SHOP_CONSENT_DECLARATION_DEFAULT_TEXT = (
+    "These customers gave us their number at our counter and agreed to receive offers from us on WhatsApp."
+)
+
+def _canonical_whatsapp_recipient_snapshot(phone_numbers, region=None):
+    if not phone_numbers:
+        raise ValueError('At least one recipient phone number is required.')
+    seen = set()
+    for number in phone_numbers:
+        cleaned = normalize_recipient_number(number, region=region)
+        seen.add(cleaned)
+    normalized_numbers = sorted(seen)
+    if not normalized_numbers:
+        raise ValueError('No valid recipient phone numbers provided.')
+    encoded = json.dumps(normalized_numbers, ensure_ascii=False, separators=(',', ':'))
+    return normalized_numbers, encoded, hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+def create_whatsapp_campaign_consent_declaration(
+    conn, task_id, campaign_id, business_user_id, phone_numbers,
+    declaration_text=SHOP_CONSENT_DECLARATION_DEFAULT_TEXT, region=None,
+):
+    """Insert a campaign-level declaration without committing the caller's transaction."""
+    if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 1:
+        raise ValueError('A valid task ID is required.')
+    if isinstance(campaign_id, bool) or not isinstance(campaign_id, int) or campaign_id < 1:
+        raise ValueError('A valid campaign ID is required.')
+    if isinstance(business_user_id, bool) or not isinstance(business_user_id, int) or business_user_id < 1:
+        raise ValueError('A valid business user ID is required.')
+    if declaration_text != SHOP_CONSENT_DECLARATION_DEFAULT_TEXT:
+        raise ValueError('The approved business declaration text is required.')
+    normalized, encoded, fingerprint = _canonical_whatsapp_recipient_snapshot(phone_numbers, region=region)
+    task = conn.execute(
+        'SELECT campaign_id, owner_user_id FROM tasks WHERE id = ?', (task_id,)
+    ).fetchone()
+    if task:
+        expected_campaign_id = task['campaign_id'] or task_id
+        if task['campaign_id'] is not None and campaign_id != expected_campaign_id:
+            raise ValueError('The declaration campaign does not match the task.')
+        if task['owner_user_id'] is not None and task['owner_user_id'] != business_user_id:
+            raise ValueError('The declaration owner does not match the campaign owner.')
+    cursor = conn.execute('''
+        INSERT INTO whatsapp_campaign_consent_declarations
+            (task_id, campaign_id, business_user_id, declaration_text,
+             normalized_recipient_list, recipient_count, recipient_fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (task_id, campaign_id, business_user_id, declaration_text.strip(),
+          encoded, len(normalized), fingerprint))
+    if task and task['owner_user_id'] is not None:
+        conn.execute('''
+            UPDATE tasks
+            SET status = CASE WHEN campaign_approval_fingerprint IS NOT NULL
+                              AND campaign_approval_fingerprint != ?
+                              THEN 'pending_review' ELSE status END,
+                campaign_review_status = CASE WHEN campaign_approval_fingerprint IS NOT NULL
+                                              AND campaign_approval_fingerprint != ?
+                                              THEN 'pending_review' ELSE campaign_review_status END,
+                campaign_approved_by = CASE WHEN campaign_approval_fingerprint IS NOT NULL
+                                             AND campaign_approval_fingerprint != ?
+                                             THEN NULL ELSE campaign_approved_by END,
+                campaign_approved_at = CASE WHEN campaign_approval_fingerprint IS NOT NULL
+                                             AND campaign_approval_fingerprint != ?
+                                             THEN NULL ELSE campaign_approved_at END,
+                campaign_approval_fingerprint = CASE WHEN campaign_approval_fingerprint IS NOT NULL
+                                                      AND campaign_approval_fingerprint != ?
+                                                      THEN NULL ELSE campaign_approval_fingerprint END
+            WHERE id = ? AND owner_user_id = ?
+        ''', (fingerprint, fingerprint, fingerprint, fingerprint, fingerprint,
+              task_id, business_user_id))
+    return {
+        'declaration_id': cursor.lastrowid,
+        'task_id': task_id,
+        'campaign_id': campaign_id,
+        'business_user_id': business_user_id,
+        'recipient_count': len(normalized),
+        'recipient_fingerprint': fingerprint,
+    }
+
+def get_whatsapp_campaign_consent_declaration(conn, task_id, campaign_id=None):
+    """Read the immutable campaign declaration; never treats absence as consent."""
+    if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 1:
+        raise ValueError('A valid task ID is required.')
+    if campaign_id is None:
+        return conn.execute(
+            'SELECT * FROM whatsapp_campaign_consent_declarations WHERE task_id = ? ORDER BY id DESC LIMIT 1',
+            (task_id,),
+        ).fetchone()
+    return conn.execute(
+        'SELECT * FROM whatsapp_campaign_consent_declarations WHERE task_id = ? AND campaign_id = ? ORDER BY id DESC LIMIT 1',
+        (task_id, campaign_id),
+    ).fetchone()
+
+def record_shop_consent_declaration(conn, shop_name, uploader_user_id, phone_numbers,
+                                    source='billing_counter',
+                                    declaration_text=SHOP_CONSENT_DECLARATION_DEFAULT_TEXT,
+                                    region=None):
+    """Record an auditable shop consent declaration and register shop_attested recipient consent."""
+    if not shop_name or not isinstance(shop_name, str) or not shop_name.strip():
+        raise ValueError('A valid shop name is required.')
+    if isinstance(uploader_user_id, bool) or not isinstance(uploader_user_id, int) or uploader_user_id < 1:
+        raise ValueError('A valid uploader user ID is required.')
+    if not phone_numbers:
+        raise ValueError('At least one recipient phone number is required.')
+
+    if declaration_text != SHOP_CONSENT_DECLARATION_DEFAULT_TEXT:
+        raise ValueError('The approved business declaration text is required.')
+    normalized_numbers, _, _ = _canonical_whatsapp_recipient_snapshot(phone_numbers, region=region)
+
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO shop_consent_declarations
+            (shop_name, uploader_user_id, source, recipient_count, declaration_text)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (shop_name.strip(), uploader_user_id, source, len(normalized_numbers), declaration_text.strip()))
+    declaration_id = cursor.lastrowid
+
+    cursor.executemany('''
+        INSERT INTO recipient_consent_records (phone_number, declaration_id, status)
+        VALUES (?, ?, 'shop_attested')
+    ''', [(num, declaration_id) for num in normalized_numbers])
+    return {
+        'declaration_id': declaration_id,
+        'shop_name': shop_name.strip(),
+        'uploader_user_id': uploader_user_id,
+        'source': source,
+        'recipient_count': len(normalized_numbers),
+        'phone_numbers': normalized_numbers,
+    }
+
+def record_whatsapp_opt_out(conn, phone_number, reason='user_opt_out', region=None):
+    """Record an opt-out for a recipient. Opted-out recipients are never messaged."""
+    cleaned = normalize_recipient_number(phone_number, region=region)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO whatsapp_opt_outs (phone_number, reason, opted_out_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    ''', (cleaned, reason))
+    cursor.execute('''
+        UPDATE recipient_consent_records
+        SET status = 'revoked'
+        WHERE phone_number = ?
+    ''', (cleaned,))
+
+def is_recipient_opted_out(conn, phone_number, region=None):
+    cleaned = normalize_recipient_number(phone_number, region=region)
+    row = conn.execute(
+        'SELECT 1 FROM whatsapp_opt_outs WHERE phone_number IN (?, ?) LIMIT 1', (cleaned, cleaned[1:])
+    ).fetchone()
+    return row is not None
+
+def check_recipients_consent_and_opt_out(conn, phone_numbers, region=None):
+    """Check consent and opt-out status for a list of numbers.
+
+    Returns dict with:
+      - valid_attested: list of numbers that have active shop_attested consent and not opted out
+      - opted_out: list of numbers that have opted out (blocked)
+      - unattested: list of numbers without valid consent record (blocked)
+      - all_valid: boolean indicating if all numbers are validly attested and not opted out
+    """
+    cleaned_numbers = []
+    invalid_numbers = []
+    for num in phone_numbers:
+        try:
+            cleaned_numbers.append(normalize_recipient_number(num, region=region))
+        except ValueError:
+            invalid_numbers.append(str(num))
+
+    opted_out = []
+    unattested = []
+    valid_attested = []
+
+    opt_out_rows = set()
+    table_check = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='whatsapp_opt_outs'"
+    ).fetchone()
+    consent_table_check = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recipient_consent_records'"
+    ).fetchone()
+    if not table_check or not consent_table_check:
+        raise RuntimeError('Authoritative WhatsApp consent and opt-out data is unavailable.')
+    if cleaned_numbers:
+        placeholders = ','.join('?' for _ in cleaned_numbers)
+        opt_out_rows = {
+            r[0] for r in conn.execute(
+                f'SELECT phone_number FROM whatsapp_opt_outs WHERE phone_number IN ({placeholders})',
+                cleaned_numbers,
+            ).fetchall()
+        }
+        opt_out_rows.update(r[0] for r in conn.execute(
+            f'SELECT phone_number FROM whatsapp_opt_outs WHERE phone_number IN ({placeholders})',
+            [number[1:] for number in cleaned_numbers],
+        ).fetchall())
+
+    attested_rows = set()
+    if cleaned_numbers:
+        placeholders = ','.join('?' for _ in cleaned_numbers)
+        attested_rows = {
+            r[0] for r in conn.execute(
+                f"SELECT phone_number FROM recipient_consent_records WHERE status = 'shop_attested' AND phone_number IN ({placeholders})",
+                cleaned_numbers,
+            ).fetchall()
+        }
+
+    for num in cleaned_numbers:
+        if num in opt_out_rows or num[1:] in opt_out_rows:
+            opted_out.append(num)
+        elif num in attested_rows:
+            valid_attested.append(num)
+        else:
+            unattested.append(num)
+
+    return {
+        'valid_attested': valid_attested,
+        'opted_out': opted_out,
+        'unattested': unattested + invalid_numbers,
+        'all_valid': len(opted_out) == 0 and len(unattested) == 0 and not invalid_numbers and len(cleaned_numbers) > 0,
+    }
+
+
+def initialize_database():
+    """Initialize the database with explicit rollback and connection cleanup."""
+    conn = get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        result = _initialize_database_with_connection(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return result
 
 def init_db():
     """Backward-compatible alias for explicit initialization callers."""

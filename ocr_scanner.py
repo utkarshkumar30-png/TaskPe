@@ -3,17 +3,21 @@ import re
 import json
 import difflib
 import asyncio
-import os
+import logging
+import platform
 
-# Attempt to import Windows native OCR
+logger = logging.getLogger(__name__)
+
+# Load the Windows backend only on Windows. Linux must not require winsdk.
 HAS_WINSDK = False
-try:
-    import winsdk.windows.graphics.imaging as imaging
-    import winsdk.windows.media.ocr as ocr
-    import winsdk.windows.storage as storage
-    HAS_WINSDK = True
-except Exception as e:
-    print(f"Native Windows SDK OCR not available: {e}")
+if platform.system() == "Windows":
+    try:
+        import winsdk.windows.graphics.imaging as imaging
+        import winsdk.windows.media.ocr as ocr
+        import winsdk.windows.storage as storage
+        HAS_WINSDK = True
+    except Exception:
+        logger.info("Windows OCR backend unavailable; using safe OCR fallback.")
 
 async def _extract_text_native_async(file_path):
     """Run native Windows.Media.Ocr on the given image path."""
@@ -32,17 +36,40 @@ async def _extract_text_native_async(file_path):
     result = await engine.recognize_async(bitmap)
     return result.text or ""
 
-def run_ocr_on_image(file_path):
-    """Extract text from screenshot using native Windows OCR or regex fallback."""
-    if not os.path.exists(file_path):
+
+TESSERACT_CONFIG = "--psm 11"
+
+
+def _extract_text_tesseract(file_path):
+    """Run Linux OCR without making Tesseract a process-wide requirement."""
+    try:
+        import pytesseract
+    except ImportError:
+        logger.warning("Linux OCR unavailable: pytesseract is not installed.")
         return ""
-    
-    if HAS_WINSDK:
+
+    try:
+        return pytesseract.image_to_string(file_path, lang="eng", config=TESSERACT_CONFIG) or ""
+    except Exception as exc:
+        logger.warning("Linux OCR unavailable: %s", type(exc).__name__)
+        return ""
+
+
+def run_ocr_on_image(file_path):
+    """Extract screenshot text using the platform's available OCR backend."""
+    if not file_path or not os.path.isfile(file_path):
+        return ""
+
+    system = platform.system()
+    if system == "Windows" and HAS_WINSDK:
         try:
             return asyncio.run(_extract_text_native_async(file_path))
         except Exception:
-            # Non-image or corrupted format, fallback gracefully
             return ""
+
+    if system == "Linux":
+        return _extract_text_tesseract(file_path)
+
     return ""
 
 

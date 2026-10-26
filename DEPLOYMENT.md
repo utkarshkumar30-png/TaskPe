@@ -22,6 +22,24 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+## OCR backend
+
+TaskPe keeps the Windows `Windows.Media.Ocr` backend when WinSDK is available.
+Linux deployments use Tesseract through the `pytesseract` Python package. On
+Ubuntu, install the system OCR engine separately:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tesseract-ocr
+which tesseract
+tesseract --version
+python -c "import pytesseract; print(pytesseract.get_tesseract_version())"
+```
+
+OCR does not require a database migration. If the Linux OCR engine or Python
+package is unavailable, proof OCR fails closed and does not auto-approve a
+submission.
+
 ## Environment variables
 
 Set variables in the process/service environment or a host-local secret
@@ -201,6 +219,32 @@ PRAGMA foreign_key_check;
 
 The expected integrity result is `ok` and the foreign-key result is empty.
 
+### Deployment-script migration gate
+
+`deploy.sh` does not call `database.initialize_database()` against the live
+database. That initializer creates tables and indexes, alters compatible
+columns, backfills campaign identity and legacy business review state, and
+can otherwise change existing rows. The deployment script instead opens the
+resolved database in SQLite read-only mode and calls
+`database.verify_required_schema()`. A missing table, column, index, or
+trigger aborts the deployment; it does not trigger an implicit migration.
+
+The current required schema includes the base application tables and the
+consent, opt-out, campaign-plan identity, recipient-allocation, device-limit,
+and finance-related structures represented by `REQUIRED_SCHEMA`,
+`REQUIRED_INDEXES`, and `REQUIRED_TRIGGERS` in `database.py`. Review the
+initializer and each explicit migration script before any production change.
+The exact-money, signup/device-limit, campaign-plan identity, and legacy
+business review-state changes must be validated on a disposable database
+copy, with a verified backup and integrity/foreign-key checks, before an
+explicitly authorized migration process is considered.
+
+The deployment script checks that both
+`TASKPE_WHATSAPP_LINKED_DEVICE_ENABLED` and
+`TASKPE_WA_CAMPAIGN_BATCH_HTTP_SEND_ENABLED` are disabled before code changes,
+after the schema gate, and after service restart. It never writes either
+flag. Changing them requires a separate approved release process.
+
 ## Waitress startup
 
 The existing Windows launcher runs:
@@ -286,6 +330,17 @@ storage with appropriate retention and access controls.
 
 ## Restore and rollback
 
+The repository's `rollback.sh` restores application files and environment
+files from the deployment record, restarts the services, and checks database
+integrity. Before any restore or restart, it requires the recorded authoritative
+environment files to exist and requires exactly one explicit disabled value for
+both WhatsApp sending flags in the current and recorded files. Invalid,
+ambiguous, or enabled values abort rollback before target mutation. It does
+**not** restore the SQLite database or upload data automatically. The recorded
+database backup is a recovery input for the manual restore procedure below;
+database restoration requires explicit operator authorization and a verified
+replacement path.
+
 1. Stop Waitress and the reverse proxy route to the application.
 2. Preserve the current database, uploads, and logs.
 3. Restore the verified SQLite backup to a new path; do not overwrite the only
@@ -308,6 +363,9 @@ it does not mean deleting or rewriting the original production database.
 - [ ] Reverse proxy configured with HTTPS and HTTP redirect.
 - [ ] DNS, certificate, firewall, and proxy headers externally verified.
 - [ ] Database and both upload directories backed up and restorable.
+- [ ] `TASKPE_WHATSAPP_LINKED_DEVICE_ENABLED=0` and
+      `TASKPE_WA_CAMPAIGN_BATCH_HTTP_SEND_ENABLED=0` verified in the
+      authoritative service environment files.
 - [ ] Disposable-copy migration validation completed where required.
 - [ ] SQLite integrity and foreign-key checks pass.
 - [ ] Full automated suite and JavaScript syntax checks pass.

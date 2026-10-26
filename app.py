@@ -1,4 +1,5 @@
 import os
+import base64
 import csv
 import json
 import io
@@ -18,7 +19,10 @@ import urllib.request
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, session, send_from_directory, Response
+from flask import Flask, request, jsonify, render_template, session, send_from_directory, Response, send_file
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -105,6 +109,42 @@ except ValueError:
 if TRUSTED_PROXY_HOPS not in {0, 1}:
     raise RuntimeError('TRUSTED_PROXY_HOPS must be 0 or 1.')
 ENABLE_HSTS = os.environ.get('ENABLE_HSTS', '').strip().lower() in {'1', 'true', 'yes'}
+WHATSAPP_LINKED_DEVICE_ENABLED = os.environ.get(
+    'TASKPE_WHATSAPP_LINKED_DEVICE_ENABLED', '0'
+).strip().lower() in {'1', 'true', 'yes'}
+WHATSAPP_TEST_TRANSPORT_ENABLED = (
+    os.environ.get('TASKPE_TEST_FAKE_WHATSAPP_TRANSPORT', '0').strip().lower()
+    in {'1', 'true', 'yes'} and os.environ.get('ENVIRONMENT', '').strip().lower() == 'development'
+)
+WHATSAPP_SERVICE_URL = os.environ.get(
+    'TASKPE_WA_SERVICE_URL', 'http://127.0.0.1:8765'
+).strip().rstrip('/')
+WHATSAPP_SERVICE_SHARED_SECRET = os.environ.get(
+    'TASKPE_WA_SERVICE_SHARED_SECRET', ''
+).strip()
+try:
+    WHATSAPP_SERVICE_TIMEOUT_SECONDS = float(
+        os.environ.get('TASKPE_WA_SERVICE_TIMEOUT_SECONDS', '8')
+    )
+except ValueError:
+    raise RuntimeError('TASKPE_WA_SERVICE_TIMEOUT_SECONDS must be a number.')
+if WHATSAPP_SERVICE_TIMEOUT_SECONDS <= 0 or WHATSAPP_SERVICE_TIMEOUT_SECONDS > 30:
+    raise RuntimeError('TASKPE_WA_SERVICE_TIMEOUT_SECONDS must be between 0 and 30.')
+if WHATSAPP_LINKED_DEVICE_ENABLED and len(WHATSAPP_SERVICE_SHARED_SECRET) < 32:
+    raise RuntimeError(
+        'TASKPE_WA_SERVICE_SHARED_SECRET must be at least 32 characters when linked-device integration is enabled.'
+    )
+
+class _RejectWhatsAppRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+_WHATSAPP_SERVICE_OPENER = urllib.request.build_opener(_RejectWhatsAppRedirects())
+
+
+def whatsapp_feature_enabled():
+    """Return whether a real or explicitly injected local test path is enabled."""
+    return WHATSAPP_LINKED_DEVICE_ENABLED or WHATSAPP_TEST_TRANSPORT_ENABLED
 
 logger = logging.getLogger(__name__)
 _rate_limit_lock = threading.Lock()
@@ -122,6 +162,8 @@ RATE_LIMIT_RULES = {
     '/api/auth/register-email': (10, 600),
     '/api/campaign-inquiries': (5, 600),
     '/api/wallet/withdraw': (5, 600),
+    '/api/whatsapp/connection/qr': (5, 600),
+    '/api/whatsapp/connection/disconnect': (10, 600),
 }
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
@@ -305,13 +347,22 @@ def generate_referral_code(name):
     digits = ''.join(random.choices(string.digits, k=3))
     return f"{clean}{digits}"
 
-def normalize_phone_number(value):
-    """Normalize phone input for allocation and target-number uniqueness."""
-    return database.normalize_target_number(value)
+def normalize_phone_number(value, region=None):
+    """Normalize a recipient to E.164; never guess a national region."""
+    try:
+        return database.normalize_recipient_number(value, region=region)
+    except ValueError:
+        return ''
+
+
+def recipient_number_to_jid(value, region=None):
+    """Convert a validated E.164 recipient into the Node JID form."""
+    normalized = database.normalize_recipient_number(value, region=region)
+    return f'{normalized[1:]}@s.whatsapp.net'
 
 def normalize_auth_mobile(value):
     """Normalize Indian signup/OTP input to its ten-digit local form."""
-    digits = database.normalize_target_number(value)
+    digits = database.normalize_legacy_target_number(value)
     if len(digits) == 12 and digits.startswith('91'):
         digits = digits[-10:]
     return digits
@@ -493,26 +544,1986 @@ def otp_digest(mobile, otp):
 def reset_token_digest(token):
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
-def task_recipient_pool(task):
+def task_recipient_pool(task, allow_legacy=False):
     try:
         numbers = json.loads(task['target_numbers'])
     except Exception:
         numbers = [task['target_numbers']]
     # Preserve order while eliminating formatting duplicates in the source pool.
     unique_numbers = []
+    task_region = task['recipient_region'] if 'recipient_region' in task.keys() else None
     seen = set()
     for number in numbers:
-        clean = normalize_phone_number(number)
+        clean = normalize_phone_number(number, region=task_region)
+        if not clean and allow_legacy:
+            # Compatibility only for pre-existing manual assignment data. New
+            # task creation and automated campaign planning remain strict.
+            clean = database.normalize_legacy_target_number(number)
         if clean and clean not in seen:
             seen.add(clean)
             unique_numbers.append(clean)
     return unique_numbers
+
+
+def _campaign_recipient_fingerprint(numbers):
+    canonical_numbers = sorted(set(numbers))
+    encoded = json.dumps(canonical_numbers, ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def business_campaign_is_approved(conn, task):
+    """Return whether a business-owned campaign has an intact approval snapshot.
+
+    Admin-created tasks have no owner and retain their established lifecycle.
+    Business campaigns must have both an admin approval and a declaration that
+    still matches the task's current normalized recipient list.
+    """
+    if not task or 'owner_user_id' not in task.keys() or task['owner_user_id'] is None:
+        return True
+    if 'campaign_review_status' in task.keys() and task['campaign_review_status'] != 'approved':
+        return False
+    try:
+        recipients = task_recipient_pool(task)
+        declaration = database.get_whatsapp_campaign_consent_declaration(
+            conn, task['id'], task['campaign_id'] or task['id'])
+        fingerprint = _campaign_recipient_fingerprint(recipients)
+        return bool(
+            declaration and declaration['business_user_id'] == task['owner_user_id']
+            and declaration['campaign_id'] == (task['campaign_id'] or task['id'])
+            and declaration['declaration_text'] == database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT
+            and declaration['recipient_fingerprint'] == fingerprint
+            and declaration['recipient_count'] == len(recipients)
+            and task['campaign_approval_fingerprint'] == fingerprint
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
+        return False
+
+def build_recipient_eligibility(conn, task_or_id, exclude_plan_id=None):
+    """Return a read-only, deterministic eligibility snapshot for a task.
+
+    This deliberately mirrors ``take_task``'s current allocation semantics:
+    same-campaign ALLOCATED and COMPLETED rows are excluded, as are active
+    claims belonging to another plan. Recorded WhatsApp opt-outs are also
+    excluded before a caller can create claims or reservations. Callers
+    receive a snapshot and must not treat it as a reservation.
+    """
+    if isinstance(task_or_id, bool):
+        raise ValueError('A valid task is required.')
+    if isinstance(task_or_id, int):
+        task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_or_id,)).fetchone()
+    else:
+        task = task_or_id
+    if not task:
+        raise ValueError('Task not found.')
+
+    task_id = task['id']
+    campaign_id = task['campaign_id'] or task_id
+    source_numbers = task_recipient_pool(task)
+    allocation_rows = conn.execute('''
+        SELECT phone_number, status
+        FROM recipient_allocations
+        WHERE campaign_id = ? AND status IN ('ALLOCATED', 'COMPLETED')
+    ''', (campaign_id,)).fetchall()
+    allocation_states = {}
+    for row in allocation_rows:
+        stored_number = str(row['phone_number'] or '')
+        allocation_states.setdefault(stored_number, set()).add(row['status'])
+        if stored_number.startswith('+'):
+            allocation_states.setdefault(stored_number[1:], set()).update(
+                allocation_states[stored_number]
+            )
+        elif stored_number.isdigit():
+            allocation_states.setdefault('+' + stored_number, set()).update(
+                allocation_states[stored_number]
+            )
+
+    claim_query = '''
+        SELECT recipient_number
+        FROM whatsapp_campaign_recipient_claims
+        WHERE campaign_id = ? AND state = 'claimed'
+    '''
+    claim_params = [campaign_id]
+    if exclude_plan_id is not None:
+        claim_query += ' AND plan_id != ?'
+        claim_params.append(exclude_plan_id)
+    claimed_numbers = set()
+    for row in conn.execute(claim_query, claim_params).fetchall():
+        stored_number = str(row['recipient_number'] or '')
+        claimed_numbers.add(stored_number)
+        claimed_numbers.add(stored_number[1:] if stored_number.startswith('+') else '+' + stored_number)
+
+    opted_out_numbers = _authoritative_whatsapp_opt_out_keys(conn)
+
+    eligible = []
+    exclusion_counts = {
+        'allocated_same_campaign': 0,
+        'completed_same_campaign': 0,
+        'claimed_same_campaign': 0,
+    }
+    for number in source_numbers:
+        if number in opted_out_numbers:
+            exclusion_counts['opted_out'] = exclusion_counts.get('opted_out', 0) + 1
+            continue
+        states = allocation_states.get(number, set())
+        # Match take_task's exclusion semantics.  If inconsistent historical
+        # data has both states, report the active allocation as the reason.
+        if 'ALLOCATED' in states:
+            exclusion_counts['allocated_same_campaign'] += 1
+        elif 'COMPLETED' in states:
+            exclusion_counts['completed_same_campaign'] += 1
+        elif number in claimed_numbers:
+            exclusion_counts['claimed_same_campaign'] += 1
+        else:
+            eligible.append(number)
+
+    return {
+        'task_id': task_id,
+        'campaign_id': campaign_id,
+        'source_recipient_count': len(source_numbers),
+        'eligible_recipient_count': len(eligible),
+        'eligible_recipients': eligible,
+        'exclusion_counts': exclusion_counts,
+    }
+
+
+def _opt_out_lookup_keys(value):
+    """Return canonical and supported legacy forms for an opt-out value."""
+    raw = str(value or '').strip()
+    if not raw:
+        return set()
+    keys = {raw}
+    if raw.startswith('+'):
+        keys.add(raw[1:])
+    elif raw.isdigit():
+        keys.add('+' + raw)
+    try:
+        canonical = database.normalize_recipient_number(raw)
+    except (TypeError, ValueError):
+        canonical = ''
+    if canonical:
+        keys.update({canonical, canonical[1:]})
+    return keys
+
+
+def _authoritative_whatsapp_opt_out_keys(conn):
+    """Read opt-outs fail closed and retain supported legacy storage forms."""
+    table_check = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='whatsapp_opt_outs'"
+    ).fetchone()
+    if not table_check:
+        raise ValueError('Authoritative WhatsApp opt-out data is unavailable.')
+    keys = set()
+    for row in conn.execute('SELECT phone_number FROM whatsapp_opt_outs').fetchall():
+        keys.update(_opt_out_lookup_keys(row['phone_number']))
+    return keys
+
+MAX_CAMPAIGN_PLAN_RECIPIENTS = 80
+CAMPAIGN_BATCH_ID_PREFIX = 'taskpe-wa-batch-v1:'
+CAMPAIGN_BATCH_STATE_VALUES = frozenset({'pending', 'reserving', 'reserved', 'unknown', 'failed'})
+CAMPAIGN_CANCELLATION_STATE_VALUES = frozenset({'not_requested', 'checking', 'blocked', 'cancelled'})
+
+def _campaign_batch_id(plan_id):
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise ValueError('Invalid campaign plan identity.')
+    return f'{CAMPAIGN_BATCH_ID_PREFIX}{plan_id}'
+
+def _campaign_batch_fingerprint(batch_id, sender_worker_id, campaign_id,
+                                task_id, plan_id, recipient_rows,
+                                content_reference, content_type='text'):
+    """Match Node's canonical batch fingerprint byte-for-byte."""
+    items = []
+    for row in recipient_rows:
+        key = campaign_plan_recipient_idempotency_key(plan_id, row['id'])
+        items.append({
+            'position': row['position'],
+            'planRecipientId': row['id'],
+            'idempotencyKey': key,
+            'messageId': key,
+            'recipientJid': recipient_number_to_jid(row['recipient_number']),
+            'contentType': content_type,
+            'payloadReference': content_reference,
+        })
+    canonical = {
+        'batchId': batch_id,
+        'senderWorkerId': sender_worker_id,
+        'campaignId': campaign_id,
+        'taskId': task_id,
+        'planId': plan_id,
+        'items': items,
+    }
+    return hashlib.sha256(json.dumps(
+        canonical, separators=(',', ':'), ensure_ascii=False
+    ).encode('utf-8')).hexdigest()
+
+def select_eligible_recipients(eligibility, quantity=None):
+    """Select the first N eligible recipients, or all when quantity is omitted."""
+    if not isinstance(eligibility, dict) or not isinstance(
+        eligibility.get('eligible_recipients'), list
+    ):
+        raise ValueError('A valid eligibility snapshot is required.')
+    eligible = eligibility['eligible_recipients']
+    if quantity is None or quantity == 'all':
+        if len(eligible) > MAX_CAMPAIGN_PLAN_RECIPIENTS:
+            raise ValueError(f'Campaign plans are limited to {MAX_CAMPAIGN_PLAN_RECIPIENTS} recipients.')
+        return list(eligible)
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise ValueError('Recipient quantity must be a positive integer or all.')
+    if quantity > MAX_CAMPAIGN_PLAN_RECIPIENTS:
+        raise ValueError(f'Campaign plans are limited to {MAX_CAMPAIGN_PLAN_RECIPIENTS} recipients.')
+    if quantity > len(eligible):
+        raise ValueError('Recipient quantity exceeds eligible recipients.')
+    return list(eligible[:quantity])
+
+def create_campaign_send_plan(conn, task_or_id, sender_worker_id,
+                              plan_key, quantity=None, content_reference=None,
+                              content_type='text'):
+    """Atomically persist a deterministic audience snapshot before sending.
+
+    This is intentionally a local Flask service. It does not reserve Node
+    quota, call a socket, or apply consent/opt-out policy. A duplicate plan
+    key is idempotent only when the
+    validated request is identical.
+    """
+    if isinstance(sender_worker_id, bool) or not isinstance(sender_worker_id, int) or sender_worker_id < 1:
+        raise ValueError('A valid sender worker is required.')
+    if not isinstance(plan_key, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', plan_key):
+        raise ValueError('A valid plan key is required.')
+    if not isinstance(content_reference, str) or not content_reference.strip() or len(content_reference) > 500:
+        raise ValueError('A safe content reference is required.')
+    if content_type not in {'text', 'image', 'video'}:
+        raise ValueError('Invalid message content type.')
+    if re.search(r'[\x00-\x1f\x7f]', content_reference):
+        raise ValueError('A safe content reference is required.')
+
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        existing = conn.execute('''
+            SELECT id, request_fingerprint, recipient_fingerprint, task_id,
+                   recipient_count, requested_quantity, state, batch_id,
+                   batch_request_fingerprint, batch_content_type,
+                   batch_state, created_at
+            FROM whatsapp_campaign_plans WHERE plan_key = ?
+        ''', (plan_key,)).fetchone()
+
+        task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_or_id,)).fetchone() if isinstance(task_or_id, int) else task_or_id
+        if not task or not business_campaign_is_approved(conn, task):
+            raise ValueError('Campaign approval or recipient declaration is invalid.')
+        eligibility = build_recipient_eligibility(
+            conn, task, exclude_plan_id=existing['id'] if existing else None
+        )
+        source_fingerprint = _campaign_recipient_fingerprint(task_recipient_pool(task))
+        selected = select_eligible_recipients(eligibility, quantity)
+        if not selected:
+            raise ValueError('At least one eligible recipient is required.')
+        request_fingerprint = hashlib.sha256(json.dumps({
+            'task_id': eligibility['task_id'],
+            'campaign_id': eligibility['campaign_id'],
+            'sender_worker_id': sender_worker_id,
+            'content_reference': content_reference,
+            'recipients': selected,
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+        if existing:
+            if (existing['request_fingerprint'] != request_fingerprint or
+                    existing['recipient_fingerprint'] != source_fingerprint):
+                raise ValueError('Plan key is already used for a different request.')
+            conn.commit()
+            return {
+                'created': False,
+                'idempotent': True,
+                'plan_id': existing['id'],
+                'state': existing['state'],
+                'recipient_count': existing['recipient_count'],
+                'requested_quantity': existing['requested_quantity'],
+                'batch_id': existing['batch_id'],
+                'batch_request_fingerprint': existing['batch_request_fingerprint'],
+                'batch_content_type': existing['batch_content_type'],
+                'batch_state': existing['batch_state'],
+                'created_at': existing['created_at'],
+            }
+
+        cursor = conn.execute('''
+            INSERT INTO whatsapp_campaign_plans
+                (plan_key, request_fingerprint, recipient_fingerprint, task_id, campaign_id,
+                 sender_worker_id, content_reference, recipient_count,
+                 requested_quantity, state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating')
+        ''', (
+            plan_key, request_fingerprint, source_fingerprint, eligibility['task_id'],
+            eligibility['campaign_id'], sender_worker_id, content_reference,
+            len(selected), 'all' if quantity == 'all' else str(quantity),
+        ))
+        plan_id = cursor.lastrowid
+        conn.executemany('''
+            INSERT INTO whatsapp_campaign_plan_recipients
+                (plan_id, recipient_number, position, idempotency_key)
+            VALUES (?, ?, ?, ?)
+        ''', [
+            (plan_id, recipient, position, f'pending:{plan_id}:{position}')
+            for position, recipient in enumerate(selected, start=1)
+        ])
+        for row in conn.execute('''
+            SELECT id, plan_id FROM whatsapp_campaign_plan_recipients
+            WHERE plan_id = ? ORDER BY position
+        ''', (plan_id,)).fetchall():
+            conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET idempotency_key = ? WHERE id = ?
+            ''', (
+                database.whatsapp_campaign_plan_recipient_idempotency_key(row['plan_id'], row['id']),
+                row['id'],
+            ))
+        recipient_rows = conn.execute('''
+            SELECT id, recipient_number, position FROM whatsapp_campaign_plan_recipients
+            WHERE plan_id = ? ORDER BY position
+        ''', (plan_id,)).fetchall()
+        batch_id = _campaign_batch_id(plan_id)
+        batch_fingerprint = _campaign_batch_fingerprint(
+            batch_id, sender_worker_id, eligibility['campaign_id'],
+            eligibility['task_id'], plan_id, recipient_rows, content_reference,
+            content_type,
+        )
+        conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET batch_id = ?, batch_request_fingerprint = ?,
+                batch_content_type = ?, batch_state = 'pending',
+                batch_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND batch_id IS NULL
+        ''', (batch_id, batch_fingerprint, content_type, plan_id))
+        conn.executemany('''
+            INSERT INTO whatsapp_campaign_recipient_claims
+                (campaign_id, task_id, recipient_number, plan_id, plan_recipient_id, state)
+            VALUES (?, ?, ?, ?, ?, 'claimed')
+        ''', [
+            (eligibility['campaign_id'], eligibility['task_id'], row['recipient_number'], plan_id, row['id'])
+            for row in recipient_rows
+        ])
+        conn.execute('''
+            UPDATE whatsapp_campaign_plans SET state = 'ready' WHERE id = ? AND state = 'creating'
+        ''', (plan_id,))
+        if conn.execute('SELECT changes() AS count').fetchone()['count'] != 1:
+            raise RuntimeError('Unable to finalize campaign send plan.')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    row = conn.execute('''
+        SELECT id, state, recipient_count, requested_quantity, batch_id,
+               batch_request_fingerprint, batch_content_type,
+               batch_state, created_at
+        FROM whatsapp_campaign_plans WHERE id = ?
+    ''', (plan_id,)).fetchone()
+    return {
+        'created': True,
+        'idempotent': False,
+        'plan_id': row['id'],
+        'state': row['state'],
+        'recipient_count': row['recipient_count'],
+        'requested_quantity': row['requested_quantity'],
+        'batch_id': row['batch_id'],
+        'batch_request_fingerprint': row['batch_request_fingerprint'],
+        'batch_content_type': row['batch_content_type'],
+        'batch_state': row['batch_state'],
+        'created_at': row['created_at'],
+    }
+
+def release_campaign_send_plan_claims(conn, plan_id):
+    """Release claims only for an explicitly cancelled owning plan.
+
+    This is intentionally not automatic and does not touch Node quota or
+    outgoing-message rows. Ownership is part of the conditional update so an
+    old plan cannot release a newer plan's claim.
+    """
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise ValueError('A valid campaign plan is required.')
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        plan = conn.execute('''
+            SELECT state, cancellation_state, cancellation_evidence_status
+            FROM whatsapp_campaign_plans WHERE id = ?
+        ''', (plan_id,)).fetchone()
+        if not plan:
+            raise ValueError('Campaign plan not found.')
+        if (plan['state'] != 'cancelled' or
+                plan['cancellation_state'] != 'cancelled' or
+                plan['cancellation_evidence_status'] != 'absent'):
+            raise ValueError('Campaign plan must complete validated cancellation before claims are released.')
+        result = conn.execute('''
+            UPDATE whatsapp_campaign_recipient_claims
+            SET state = 'released', updated_at = CURRENT_TIMESTAMP
+            WHERE plan_id = ? AND state = 'claimed'
+        ''', (plan_id,))
+        conn.commit()
+        return {'released_count': result.rowcount}
+    except Exception:
+        conn.rollback()
+        raise
+
+def _mark_campaign_cancellation_blocked(conn, plan_id, batch_id, evidence_status, now):
+    """Record a non-release cancellation outcome without touching claims."""
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        changed = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET cancellation_state = 'blocked',
+                cancellation_evidence_status = ?,
+                cancellation_checked_at = ?
+            WHERE id = ? AND state = 'ready'
+              AND batch_id = ? AND cancellation_state = 'checking'
+        ''', (evidence_status, now, plan_id, batch_id))
+        conn.commit()
+        return changed.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+
+def _cancellation_absent_response_is_valid(response, batch_id):
+    return (
+        isinstance(response, dict) and
+        response.get('success') is True and
+        response.get('status') == 'absent' and
+        response.get('batch_id') == batch_id
+    )
+
+def _cancellation_present_response_is_valid(response, batch_id, request_fingerprint):
+    return (
+        isinstance(response, dict) and
+        response.get('success') is True and
+        response.get('status') == 'present' and
+        response.get('batch_id') == batch_id and
+        response.get('request_fingerprint') == request_fingerprint
+    )
+
+def cancel_campaign_send_plan(conn, plan_id, node_call=None, now=None, recover=False):
+    """Cancel a plan only after authenticated, validated Node absence evidence.
+
+    ``recover=True`` is an explicit retry of a prior checking/blocked attempt;
+    it always reuses the persisted batch identity.
+    """
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise ValueError('A valid campaign plan is required.')
+    worker_id = session.get('user_id')
+    if isinstance(worker_id, bool) or not isinstance(worker_id, int) or worker_id < 1:
+        raise PermissionError('Authenticated worker is required.')
+    now = _campaign_reservation_now(now)
+
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        plan = _campaign_batch_plan_row(conn, plan_id)
+        if not plan:
+            raise ValueError('Campaign plan not found.')
+        if plan['sender_worker_id'] != worker_id:
+            raise PermissionError('Campaign plan ownership mismatch.')
+        if plan['cancellation_state'] == 'cancelled' and plan['state'] == 'cancelled':
+            conn.commit()
+            return {'status': 'cancelled', 'batch_id': plan['batch_id'], 'idempotent': True, 'released_count': 0}
+        if plan['cancellation_state'] == 'checking' and not recover:
+            conn.commit()
+            return {'status': 'cancellation_pending', 'batch_id': plan['batch_id'], 'recovery_required': True}
+        if plan['state'] != 'ready':
+            raise ValueError('Campaign plan is not cancellable.')
+        if not plan['batch_id'] or not plan['batch_request_fingerprint']:
+            raise RuntimeError('Campaign batch identity is unavailable.')
+        changed = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET cancellation_state = 'checking',
+                cancellation_evidence_status = NULL,
+                cancellation_requested_at = ?,
+                cancellation_checked_at = NULL
+            WHERE id = ? AND sender_worker_id = ? AND state = 'ready'
+              AND batch_id = ? AND cancellation_state IN ('not_requested', 'blocked', 'checking')
+        ''', (now, plan_id, worker_id, plan['batch_id']))
+        if changed.rowcount != 1:
+            conn.rollback()
+            return {'status': 'cancellation_pending', 'batch_id': plan['batch_id'], 'recovery_required': True}
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    try:
+        response, status = _campaign_batch_adapter_call(
+            node_call, 'cancellation_evidence', worker_id,
+            f"/v1/users/{worker_id}/campaign-batches/{plan['batch_id']}/cancellation-status"
+        )
+    except Exception:
+        _mark_campaign_cancellation_blocked(conn, plan_id, plan['batch_id'], 'unavailable', now)
+        return {'status': 'cancellation_blocked', 'batch_id': plan['batch_id'], 'recovery_required': True, 'evidence_status': 'unavailable'}
+
+    if status != 200 or not isinstance(response, dict) or response.get('success') is not True:
+        _mark_campaign_cancellation_blocked(conn, plan_id, plan['batch_id'], 'unavailable', now)
+        return {'status': 'cancellation_blocked', 'batch_id': plan['batch_id'], 'recovery_required': True, 'evidence_status': 'unavailable'}
+    evidence_status = response.get('status')
+    if evidence_status != 'absent':
+        if evidence_status == 'present':
+            if not _cancellation_present_response_is_valid(
+                    response, plan['batch_id'], plan['batch_request_fingerprint']):
+                evidence_status = 'invalid'
+        elif evidence_status not in {'invalid'} or response.get('batch_id') != plan['batch_id']:
+            evidence_status = 'invalid'
+        _mark_campaign_cancellation_blocked(conn, plan_id, plan['batch_id'], evidence_status, now)
+        return {'status': 'cancellation_blocked', 'batch_id': plan['batch_id'], 'recovery_required': True, 'evidence_status': evidence_status}
+    if not _cancellation_absent_response_is_valid(response, plan['batch_id']):
+        _mark_campaign_cancellation_blocked(conn, plan_id, plan['batch_id'], 'invalid', now)
+        return {'status': 'cancellation_blocked', 'batch_id': plan['batch_id'], 'recovery_required': True, 'evidence_status': 'invalid'}
+
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        current = _campaign_batch_plan_row(conn, plan_id)
+        rows = _campaign_batch_recipient_rows(conn, plan_id)
+        claims = conn.execute('''
+            SELECT id, plan_recipient_id, recipient_number, state
+            FROM whatsapp_campaign_recipient_claims
+            WHERE plan_id = ? ORDER BY plan_recipient_id
+        ''', (plan_id,)).fetchall()
+        safe_batch_state = current and current['batch_state'] in {'pending', 'failed'}
+        safe_recipient_states = all(
+            row['ledger_message_id'] is None and
+            ((current['batch_state'] == 'pending' and row['state'] == 'planned') or
+             (current['batch_state'] == 'failed' and row['state'] == 'failed'))
+            for row in rows
+        ) if current else False
+        safe_claims = (
+            current and current['sender_worker_id'] == worker_id and
+            current['state'] == 'ready' and current['batch_id'] == plan['batch_id'] and
+            current['batch_request_fingerprint'] == plan['batch_request_fingerprint'] and
+            current['cancellation_state'] == 'checking' and
+            len(rows) == current['recipient_count'] == len(claims) and
+            all(claim['state'] == 'claimed' and claim['plan_recipient_id'] == row['id'] and
+                claim['recipient_number'] == row['recipient_number']
+                for claim, row in zip(claims, rows))
+        )
+        if not (safe_batch_state and safe_recipient_states and safe_claims):
+            conn.rollback()
+            _mark_campaign_cancellation_blocked(conn, plan_id, plan['batch_id'], 'invalid', now)
+            return {'status': 'cancellation_blocked', 'batch_id': plan['batch_id'], 'recovery_required': True, 'evidence_status': 'invalid'}
+        released = conn.execute('''
+            UPDATE whatsapp_campaign_recipient_claims
+            SET state = 'released', updated_at = CURRENT_TIMESTAMP
+            WHERE plan_id = ? AND state = 'claimed'
+        ''', (plan_id,))
+        if released.rowcount != len(claims):
+            raise RuntimeError('Campaign claim ownership changed during cancellation.')
+        changed = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET state = 'cancelled', cancellation_state = 'cancelled',
+                cancellation_evidence_status = 'absent', cancellation_checked_at = ?
+            WHERE id = ? AND sender_worker_id = ? AND state = 'ready'
+              AND batch_id = ? AND batch_request_fingerprint = ?
+              AND cancellation_state = 'checking'
+        ''', (now, plan_id, worker_id, plan['batch_id'], plan['batch_request_fingerprint']))
+        if changed.rowcount != 1:
+            raise RuntimeError('Campaign cancellation state changed during release.')
+        conn.commit()
+        return {'status': 'cancelled', 'batch_id': plan['batch_id'], 'released_count': released.rowcount, 'evidence_status': 'absent'}
+    except Exception:
+        conn.rollback()
+        raise
+
+CAMPAIGN_RESERVATION_STATES = frozenset({
+    'planned', 'reserving', 'reserved', 'attempted',
+    'acknowledged', 'failed', 'delivered_unknown',
+})
+CAMPAIGN_RESERVATION_LEASE_SECONDS = 300
+
+def campaign_plan_recipient_idempotency_key(plan_id, plan_recipient_id):
+    """Return the fixed-length server-derived Node ledger idempotency key."""
+    return database.whatsapp_campaign_plan_recipient_idempotency_key(plan_id, plan_recipient_id)
+
+def _campaign_reservation_now(now=None):
+    if now is None:
+        return datetime.now().replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(now, datetime):
+        return now.replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+    if not isinstance(now, str):
+        raise ValueError('Invalid reservation timestamp.')
+    try:
+        return datetime.fromisoformat(now.replace('Z', '+00:00')).replace(tzinfo=None, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+    except ValueError as exc:
+        raise ValueError('Invalid reservation timestamp.') from exc
+
+def _campaign_reservation_row(conn, plan_recipient_id):
+    return conn.execute('''
+        SELECT pr.id AS plan_recipient_id, pr.plan_id, pr.recipient_number,
+               pr.state, pr.reservation_claim_id, pr.reservation_lease_until,
+               pr.ledger_message_id, pr.failure_code,
+               p.task_id, p.campaign_id, p.sender_worker_id, p.content_reference,
+               p.state AS plan_state, p.cancellation_state
+        FROM whatsapp_campaign_plan_recipients pr
+        JOIN whatsapp_campaign_plans p ON p.id = pr.plan_id
+        WHERE pr.id = ?
+    ''', (plan_recipient_id,)).fetchone()
+
+def _campaign_reservation_result(row):
+    if not row:
+        return {'status': 'not_found'}
+    return {
+        'status': row['state'],
+        'plan_id': row['plan_id'],
+        'plan_recipient_id': row['plan_recipient_id'],
+        'ledger_message_id': row['ledger_message_id'],
+        'failure_code': row['failure_code'],
+    }
+
+def _claim_campaign_plan_recipient(conn, plan_recipient_id, claim_id, lease_until, now):
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cursor = conn.execute('''
+            UPDATE whatsapp_campaign_plan_recipients
+            SET state = 'reserving', reservation_claim_id = ?,
+                reservation_lease_until = ?, updated_at = ?
+            WHERE id = ? AND (
+                state = 'planned' OR
+                (state = 'reserving' AND reservation_lease_until IS NOT NULL
+                 AND reservation_lease_until <= ?)
+            ) AND EXISTS (
+                SELECT 1 FROM whatsapp_campaign_plans p
+                WHERE p.id = whatsapp_campaign_plan_recipients.plan_id
+                  AND p.state = 'ready'
+                  AND p.cancellation_state = 'not_requested'
+            )
+        ''', (claim_id, lease_until, now, plan_recipient_id, now))
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+
+def _project_campaign_reservation(conn, plan_recipient_id, claim_id,
+                                   state, ledger_message_id=None,
+                                   failure_code=None, now=None):
+    if state not in CAMPAIGN_RESERVATION_STATES - {'reserving'}:
+        raise ValueError('Invalid reservation projection state.')
+    now = _campaign_reservation_now(now)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        cursor = conn.execute('''
+            UPDATE whatsapp_campaign_plan_recipients
+            SET state = ?, ledger_message_id = COALESCE(?, ledger_message_id),
+                failure_code = ?, reservation_claim_id = NULL,
+                reservation_lease_until = NULL, updated_at = ?
+            WHERE id = ? AND state = 'reserving'
+              AND reservation_claim_id = ?
+              AND (? IS NULL OR ledger_message_id IS NULL OR ledger_message_id = ?)
+        ''', (
+            state, ledger_message_id, failure_code, now,
+            plan_recipient_id, claim_id, ledger_message_id, ledger_message_id,
+        ))
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+
+def reserve_campaign_plan_recipient(conn, plan_recipient_id, ledger_reserve,
+                                    now=None, lease_seconds=CAMPAIGN_RESERVATION_LEASE_SECONDS,
+                                    content_type='text'):
+    """Reserve one plan recipient without invoking a WhatsApp socket.
+
+    ``ledger_reserve`` is an injected, reservation-only adapter. It must
+    implement the Node ledger contract and must not send. Unknown adapter
+    failures leave the row in ``reserving`` for explicit recovery.
+    """
+    if not callable(ledger_reserve):
+        raise ValueError('A ledger reservation adapter is required.')
+    if content_type not in {'text', 'image', 'video'}:
+        raise ValueError('Invalid message content type.')
+    if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds < 1:
+        raise ValueError('Invalid reservation lease.')
+    now = _campaign_reservation_now(now)
+    lease_until = (datetime.strptime(now, '%Y-%m-%d %H:%M:%S') + timedelta(seconds=lease_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+    row = _campaign_reservation_row(conn, plan_recipient_id)
+    if not row:
+        return {'status': 'not_found'}
+    if row['cancellation_state'] in {'checking', 'blocked', 'cancelled'} or row['plan_state'] == 'cancelled':
+        return {'status': 'cancellation_pending', 'recovery_required': True}
+    if row['state'] != 'planned' and not (
+        row['state'] == 'reserving' and row['reservation_lease_until'] and row['reservation_lease_until'] <= now
+    ):
+        return _campaign_reservation_result(row)
+
+    claim_id = secrets.token_urlsafe(24)
+    if not _claim_campaign_plan_recipient(conn, plan_recipient_id, claim_id, lease_until, now):
+        return _campaign_reservation_result(_campaign_reservation_row(conn, plan_recipient_id))
+
+    row = _campaign_reservation_row(conn, plan_recipient_id)
+    idempotency_key = campaign_plan_recipient_idempotency_key(row['plan_id'], plan_recipient_id)
+    try:
+        response = ledger_reserve({
+            'messageId': idempotency_key,
+            'idempotencyKey': idempotency_key,
+            'senderWorkerId': row['sender_worker_id'],
+            'recipientJid': recipient_number_to_jid(row['recipient_number']),
+            'campaignId': row['campaign_id'],
+            'taskId': row['task_id'],
+            'contentType': content_type,
+            'payloadReference': row['content_reference'],
+        })
+    except Exception as exc:
+        if getattr(exc, 'code', None) == 'QUOTA_EXCEEDED':
+            projected = _project_campaign_reservation(conn, plan_recipient_id, claim_id, 'failed', failure_code='QUOTA_EXCEEDED', now=now)
+            return {'status': 'failed', 'failure_code': 'QUOTA_EXCEEDED', 'projected': projected}
+        return {'status': 'reserving', 'recovery_required': True}
+
+    record = response.get('record') if isinstance(response, dict) else None
+    ledger_state = record.get('state') if isinstance(record, dict) else None
+    ledger_message_id = record.get('message_id') if isinstance(record, dict) else None
+    state_map = {
+        'queued': 'reserved', 'attempted': 'attempted',
+        'acknowledged': 'acknowledged', 'failed': 'failed',
+        'delivered_unknown': 'delivered_unknown',
+    }
+    projected_state = state_map.get(ledger_state)
+    if (not projected_state or
+            not database.is_valid_whatsapp_ledger_token(ledger_message_id)):
+        return {'status': 'reserving', 'recovery_required': True}
+    projected = _project_campaign_reservation(
+        conn, plan_recipient_id, claim_id, projected_state,
+        ledger_message_id=ledger_message_id,
+        failure_code=record.get('failure_code') if projected_state == 'failed' else None,
+        now=now,
+    )
+    return {
+        'status': projected_state if projected else 'reserving',
+        'ledger_message_id': ledger_message_id,
+        'projected': projected,
+        'recovery_required': not projected,
+    }
+
+def recover_campaign_plan_recipient(conn, plan_recipient_id, ledger_lookup,
+                                    now=None):
+    """Recover a reservation projection without reserving or sending."""
+    if not callable(ledger_lookup):
+        raise ValueError('A ledger lookup adapter is required.')
+    now = _campaign_reservation_now(now)
+    row = _campaign_reservation_row(conn, plan_recipient_id)
+    if not row:
+        return {'status': 'not_found'}
+    if row['cancellation_state'] in {'checking', 'blocked', 'cancelled'} or row['plan_state'] == 'cancelled':
+        return {'status': 'cancellation_pending', 'recovery_required': True}
+    if row['state'] in {'reserved', 'attempted', 'acknowledged', 'failed', 'delivered_unknown'}:
+        return _campaign_reservation_result(row)
+    if row['state'] != 'reserving' or not row['reservation_lease_until'] or row['reservation_lease_until'] > now:
+        return _campaign_reservation_result(row)
+
+    claim_id = secrets.token_urlsafe(24)
+    lease_until = (datetime.strptime(now, '%Y-%m-%d %H:%M:%S') + timedelta(seconds=CAMPAIGN_RESERVATION_LEASE_SECONDS)).strftime('%Y-%m-%d %H:%M:%S')
+    if not _claim_campaign_plan_recipient(conn, plan_recipient_id, claim_id, lease_until, now):
+        return _campaign_reservation_result(_campaign_reservation_row(conn, plan_recipient_id))
+    row = _campaign_reservation_row(conn, plan_recipient_id)
+    key = campaign_plan_recipient_idempotency_key(row['plan_id'], plan_recipient_id)
+    try:
+        record = ledger_lookup(key)
+    except Exception:
+        # A lookup failure is not evidence that the reservation is absent.
+        # Keep the claim recoverable and require an operator/recovery retry.
+        return {
+            'status': 'reserving',
+            'recovery_required': True,
+            'error_code': 'LEDGER_LOOKUP_UNAVAILABLE',
+        }
+    if record is None:
+        projected = _project_campaign_reservation(conn, plan_recipient_id, claim_id, 'planned', now=now)
+        return {'status': 'planned' if projected else 'reserving', 'projected': projected}
+    if not isinstance(record, dict):
+        return {
+            'status': 'reserving',
+            'recovery_required': True,
+            'error_code': 'INVALID_LEDGER_RECORD',
+        }
+
+    state_map = {
+        'queued': 'reserved', 'attempted': 'attempted',
+        'acknowledged': 'acknowledged', 'failed': 'failed',
+        'delivered_unknown': 'delivered_unknown',
+    }
+    projected_state = state_map.get(record.get('state'))
+    ledger_message_id = record.get('message_id')
+    if (not projected_state or
+            not database.is_valid_whatsapp_ledger_token(ledger_message_id)):
+        return {'status': 'reserving', 'recovery_required': True}
+    projected = _project_campaign_reservation(
+        conn, plan_recipient_id, claim_id, projected_state,
+        ledger_message_id=ledger_message_id,
+        failure_code=record.get('failure_code') if projected_state == 'failed' else None,
+        now=now,
+    )
+    return {
+        'status': projected_state if projected else 'reserving',
+        'ledger_message_id': ledger_message_id,
+        'projected': projected,
+        'recovery_required': not projected,
+    }
+
+def _campaign_batch_plan_row(conn, plan_id):
+    return conn.execute('''
+        SELECT id, task_id, campaign_id, recipient_fingerprint,
+               sender_worker_id, content_reference,
+               recipient_count, requested_quantity, state, batch_id, batch_request_fingerprint,
+               batch_content_type, batch_state, batch_updated_at,
+               dispatch_state, dispatch_operation_id, dispatch_started_at,
+               cancellation_state, cancellation_evidence_status,
+               cancellation_requested_at, cancellation_checked_at
+        FROM whatsapp_campaign_plans WHERE id = ?
+    ''', (plan_id,)).fetchone()
+
+def _campaign_batch_recipient_rows(conn, plan_id):
+    return conn.execute('''
+        SELECT id, recipient_number, position, state, reservation_claim_id,
+               reservation_lease_until, ledger_message_id, failure_code,
+               idempotency_key
+        FROM whatsapp_campaign_plan_recipients
+        WHERE plan_id = ? ORDER BY position
+    ''', (plan_id,)).fetchall()
+
+def _ensure_campaign_batch_metadata(conn, plan_id):
+    plan = _campaign_batch_plan_row(conn, plan_id)
+    if not plan:
+        raise ValueError('Campaign plan not found.')
+    if plan['batch_id'] and plan['batch_request_fingerprint']:
+        return plan
+    rows = _campaign_batch_recipient_rows(conn, plan_id)
+    batch_id = _campaign_batch_id(plan_id)
+    fingerprint = _campaign_batch_fingerprint(
+        batch_id, plan['sender_worker_id'], plan['campaign_id'], plan['task_id'],
+        plan_id, rows, plan['content_reference'], plan['batch_content_type'] or 'text',
+    )
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        current = _campaign_batch_plan_row(conn, plan_id)
+        if current['batch_id'] and current['batch_request_fingerprint']:
+            if current['batch_id'] != batch_id or current['batch_request_fingerprint'] != fingerprint:
+                raise RuntimeError('Campaign batch identity is inconsistent.')
+        else:
+            conn.execute('''
+                UPDATE whatsapp_campaign_plans
+                SET batch_id = ?, batch_request_fingerprint = ?,
+                    batch_state = COALESCE(batch_state, 'pending'),
+                    batch_updated_at = COALESCE(batch_updated_at, CURRENT_TIMESTAMP)
+                WHERE id = ? AND batch_id IS NULL
+            ''', (batch_id, fingerprint, plan_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return _campaign_batch_plan_row(conn, plan_id)
+
+def _set_campaign_batch_state(conn, plan_id, expected_states, next_state, now=None):
+    if next_state not in CAMPAIGN_BATCH_STATE_VALUES:
+        raise ValueError('Invalid campaign batch state.')
+    now = _campaign_reservation_now(now)
+    states = tuple(expected_states)
+    placeholders = ','.join('?' for _ in states)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        result = conn.execute(f'''
+            UPDATE whatsapp_campaign_plans
+            SET batch_state = ?, batch_updated_at = ?
+            WHERE id = ? AND batch_state IN ({placeholders})
+        ''', (next_state, now, plan_id, *states))
+        conn.commit()
+        return result.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+
+def _claim_campaign_batch(conn, plan_id, now, allow_existing=False):
+    now = _campaign_reservation_now(now)
+    claim_id = secrets.token_urlsafe(24)
+    lease_until = (datetime.strptime(now, '%Y-%m-%d %H:%M:%S') + timedelta(
+        seconds=CAMPAIGN_RESERVATION_LEASE_SECONDS
+    )).strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        plan = _campaign_batch_plan_row(conn, plan_id)
+        rows = _campaign_batch_recipient_rows(conn, plan_id)
+        if not plan or not rows:
+            raise ValueError('Campaign batch is not available.')
+        if plan['state'] != 'ready' or plan['cancellation_state'] != 'not_requested':
+            raise RuntimeError('Campaign batch is unavailable during cancellation.')
+        active_claims = {
+            row['reservation_claim_id'] for row in rows
+            if row['state'] == 'reserving' and row['reservation_claim_id']
+            and row['reservation_lease_until'] and row['reservation_lease_until'] > now
+        }
+        if len(active_claims) > 1:
+            raise RuntimeError('Campaign batch has conflicting active claims.')
+        if active_claims:
+            existing_claim = next(iter(active_claims))
+            if any(row['state'] == 'planned' for row in rows):
+                raise RuntimeError('Campaign batch has a partial active claim.')
+            if allow_existing:
+                conn.commit()
+                return {'claimed': True, 'in_progress': False, 'claim_id': existing_claim}
+            conn.commit()
+            return {'claimed': False, 'in_progress': True, 'claim_id': existing_claim}
+
+        for row in rows:
+            if row['state'] == 'reserving' and row['reservation_lease_until'] and row['reservation_lease_until'] > now:
+                raise RuntimeError('Campaign batch has an active reservation claim.')
+            if row['state'] in {'reserved', 'attempted', 'acknowledged', 'failed', 'delivered_unknown'}:
+                continue
+            if row['state'] != 'planned':
+                raise RuntimeError('Campaign batch has an invalid recipient state.')
+            conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET state = 'reserving', reservation_claim_id = ?,
+                    reservation_lease_until = ?, updated_at = ?
+                WHERE id = ? AND state = 'planned'
+            ''', (claim_id, lease_until, now, row['id']))
+        result = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET batch_state = 'reserving', batch_updated_at = ?
+            WHERE id = ? AND state = 'ready'
+              AND cancellation_state = 'not_requested'
+              AND batch_state IN ('pending', 'unknown', 'reserving')
+        ''', (now, plan_id))
+        if result.rowcount != 1:
+            raise RuntimeError('Campaign batch state changed during claim.')
+        conn.commit()
+        return {'claimed': True, 'in_progress': False, 'claim_id': claim_id}
+    except Exception:
+        conn.rollback()
+        raise
+
+def _validate_campaign_batch_response(plan, rows, result):
+    if not isinstance(result, dict) or result.get('success') is not True:
+        raise ValueError('Invalid campaign batch response.')
+    batch = result.get('batch')
+    if not isinstance(batch, dict):
+        raise ValueError('Invalid campaign batch response.')
+    expected = {
+        'batch_id': plan['batch_id'],
+        'request_fingerprint': plan['batch_request_fingerprint'],
+        'sender_worker_id': plan['sender_worker_id'],
+        'campaign_id': plan['campaign_id'],
+        'task_id': plan['task_id'],
+        'plan_id': plan['id'],
+        'item_count': len(rows),
+        'state': 'reserved',
+    }
+    for field, value in expected.items():
+        if batch.get(field) != value:
+            raise ValueError('Campaign batch identity validation failed.')
+    items = batch.get('items')
+    if not isinstance(items, list) or len(items) != len(rows):
+        raise ValueError('Campaign batch item count validation failed.')
+    by_position = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get('position') in by_position:
+            raise ValueError('Campaign batch item identity validation failed.')
+        by_position[item.get('position')] = item
+    validated = []
+    expected_content_type = plan['batch_content_type'] or 'text'
+    for row in rows:
+        item = by_position.get(row['position'])
+        key = campaign_plan_recipient_idempotency_key(plan['id'], row['id'])
+        expected_jid = recipient_number_to_jid(row['recipient_number'])
+        if (
+            not item or item.get('plan_id') != plan['id'] or
+            item.get('plan_recipient_id') != row['id'] or
+            item.get('idempotency_key') != key or
+            item.get('message_id') != key or
+            not database.is_valid_whatsapp_ledger_token(item.get('message_id')) or
+            item.get('state') != 'reserved' or
+            item.get('recipient_jid') != expected_jid or
+            item.get('content_type') != expected_content_type or
+            item.get('payload_reference') != plan['content_reference']
+        ):
+            raise ValueError('Campaign batch item integrity validation failed.')
+        validated.append((row, item))
+    return validated
+
+def _project_campaign_batch(conn, plan_id, claim_id, validated, now):
+    now = _campaign_reservation_now(now)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        for row, item in validated:
+            current = conn.execute('''
+                SELECT state, reservation_claim_id, ledger_message_id
+                FROM whatsapp_campaign_plan_recipients WHERE id = ?
+            ''', (row['id'],)).fetchone()
+            if not current:
+                raise RuntimeError('Campaign recipient disappeared during projection.')
+            if current['state'] in {'reserved', 'attempted', 'acknowledged', 'failed', 'delivered_unknown'}:
+                if current['ledger_message_id'] != item['message_id']:
+                    raise RuntimeError('Campaign recipient ledger identity changed.')
+                continue
+            if current['state'] != 'reserving' or current['reservation_claim_id'] != claim_id:
+                raise RuntimeError('Campaign recipient claim ownership changed.')
+            changed = conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET state = 'reserved', ledger_message_id = ?,
+                    reservation_claim_id = NULL, reservation_lease_until = NULL,
+                    failure_code = NULL, updated_at = ?
+                WHERE id = ? AND state = 'reserving'
+                  AND reservation_claim_id = ?
+                  AND (ledger_message_id IS NULL OR ledger_message_id = ?)
+            ''', (item['message_id'], now, row['id'], claim_id, item['message_id']))
+            if changed.rowcount != 1:
+                raise RuntimeError('Campaign recipient projection lost ownership.')
+        result = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET batch_state = 'reserved', batch_updated_at = ?
+            WHERE id = ? AND batch_state IN ('reserving', 'unknown', 'reserved')
+        ''', (now, plan_id))
+        if result.rowcount != 1:
+            raise RuntimeError('Campaign batch projection state changed.')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+def _project_campaign_batch_failure(conn, plan_id, claim_id, failure_code, now):
+    now = _campaign_reservation_now(now)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        rows = _campaign_batch_recipient_rows(conn, plan_id)
+        for row in rows:
+            if row['state'] != 'reserving' or row['reservation_claim_id'] != claim_id:
+                raise RuntimeError('Campaign batch failure projection lost ownership.')
+        for row in rows:
+            conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET state = 'failed', failure_code = ?, reservation_claim_id = NULL,
+                    reservation_lease_until = NULL, updated_at = ?
+                WHERE id = ? AND state = 'reserving' AND reservation_claim_id = ?
+            ''', (failure_code, now, row['id'], claim_id))
+        result = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET batch_state = 'failed', batch_updated_at = ?
+            WHERE id = ? AND batch_state = 'reserving'
+        ''', (now, plan_id))
+        if result.rowcount != 1:
+            raise RuntimeError('Campaign batch failure state changed.')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+DISPATCH_AUTHORIZATION_TTL_SECONDS = 60
+DISPATCH_AUTHORIZATION_MAX_TTL_SECONDS = 120
+DISPATCH_AUTHORIZATION_VERSION = 1
+
+def derive_dispatch_authorization_key(secret):
+    if not secret or not isinstance(secret, str):
+        raise ValueError('A non-empty shared secret is required.')
+    return hmac.new(
+        secret.encode('utf-8'),
+        b'taskpe-wa-dispatch-authorization-v1',
+        hashlib.sha256,
+    ).digest()
+
+def create_dispatch_authorization_token(plan, worker_id, secret, now=None, ttl_seconds=DISPATCH_AUTHORIZATION_TTL_SECONDS, operation_id=None):
+    if isinstance(worker_id, bool) or not isinstance(worker_id, int) or worker_id < 1:
+        raise ValueError('Invalid worker ID for dispatch authorization.')
+    if not plan or not isinstance(plan, (dict, sqlite3.Row)):
+        raise ValueError('Invalid plan for dispatch authorization.')
+    plan_dict = dict(plan)
+    plan_id = plan_dict.get('id', plan_dict.get('plan_id'))
+    batch_id = plan_dict.get('batch_id')
+    op_id = operation_id if operation_id is not None else plan_dict.get('dispatch_operation_id')
+    request_fingerprint = plan_dict.get('batch_request_fingerprint', plan_dict.get('request_fingerprint'))
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise ValueError('Plan is missing a valid plan ID for dispatch authorization.')
+    if not isinstance(batch_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', batch_id):
+        raise ValueError('Plan is missing a valid batch ID for dispatch authorization.')
+    if not isinstance(op_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', op_id):
+        raise ValueError('Plan is missing a valid dispatch operation ID.')
+    if not isinstance(request_fingerprint, str) or not re.fullmatch(r'[a-f0-9]{64}', request_fingerprint):
+        raise ValueError('Plan is missing a valid request fingerprint.')
+    persisted_worker_id = plan_dict.get('sender_worker_id')
+    if persisted_worker_id is not None and persisted_worker_id != worker_id:
+        raise ValueError('Dispatch authorization worker mismatch.')
+    if not isinstance(secret, str) or len(secret) < 32:
+        raise ValueError('A sufficiently strong shared secret is required.')
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= DISPATCH_AUTHORIZATION_MAX_TTL_SECONDS:
+        raise ValueError('Invalid dispatch authorization lifetime.')
+
+    if now is None:
+        issued_dt = datetime.now()
+    elif isinstance(now, datetime):
+        issued_dt = now
+    elif isinstance(now, (int, float)):
+        issued_dt = datetime.fromtimestamp(now)
+    elif isinstance(now, str):
+        try:
+            issued_dt = datetime.fromisoformat(now.replace('Z', '+00:00')).replace(tzinfo=None)
+        except ValueError:
+            issued_dt = datetime.strptime(now, '%Y-%m-%d %H:%M:%S')
+    else:
+        issued_dt = datetime.now()
+
+    issued_at = int(issued_dt.timestamp())
+    expires_at = issued_at + ttl_seconds
+
+    payload = {
+        'v': DISPATCH_AUTHORIZATION_VERSION,
+        'auth_id': secrets.token_urlsafe(24),
+        'worker_id': worker_id,
+        'plan_id': plan_id,
+        'batch_id': batch_id,
+        'operation_id': op_id,
+        'request_fingerprint': request_fingerprint,
+        'issued_at': issued_at,
+        'expires_at': expires_at,
+    }
+    payload_bytes = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    b64_payload = base64.urlsafe_b64encode(payload_bytes).decode('ascii').rstrip('=')
+    canonical_data = f"v{DISPATCH_AUTHORIZATION_VERSION}.{b64_payload}".encode('utf-8')
+    derived_key = derive_dispatch_authorization_key(secret)
+    signature = hmac.new(derived_key, canonical_data, hashlib.sha256).hexdigest()
+    return f"v{DISPATCH_AUTHORIZATION_VERSION}.{b64_payload}.{signature}"
+
+def _campaign_batch_adapter_call(node_call, operation, worker_id, path, payload=None, extra_headers=None):
+    if node_call is not None:
+        try:
+            response = node_call(operation, payload, extra_headers=extra_headers)
+        except TypeError:
+            response = node_call(operation, payload)
+        if not isinstance(response, tuple) or len(response) != 2:
+            raise RuntimeError('Invalid internal WhatsApp adapter response.')
+        return response
+    method = 'POST' if operation in {'reserve', 'send'} else 'GET'
+    return _call_whatsapp_service(method, path, worker_id, payload, extra_headers=extra_headers)
+
+def reserve_campaign_send_plan_with_node(conn, plan_id, node_call=None,
+                                         now=None, content_type='text'):
+    """Reserve a Flask plan in Node and project the complete durable result.
+
+    This is an internal server-side operation. ``worker_id`` is trusted only
+    after matching the plan owner; browser input is never used as identity.
+    Unknown Node outcomes remain recoverable and never release claims.
+    """
+    if content_type not in {'text', 'image', 'video'}:
+        raise ValueError('Invalid message content type.')
+    now = _campaign_reservation_now(now)
+    plan = _ensure_campaign_batch_metadata(conn, plan_id)
+    authenticated_worker_id = session.get('user_id')
+    if isinstance(authenticated_worker_id, bool) or not isinstance(authenticated_worker_id, int) or authenticated_worker_id < 1:
+        raise PermissionError('Authenticated worker is required.')
+    if plan['sender_worker_id'] != authenticated_worker_id:
+        raise PermissionError('Campaign plan ownership mismatch.')
+    if content_type != (plan['batch_content_type'] or 'text'):
+        raise ValueError('Campaign batch content type does not match the persisted plan.')
+    if plan['state'] == 'cancelled' or plan['cancellation_state'] in {'checking', 'blocked', 'cancelled'}:
+        return {
+            'status': 'cancellation_pending' if plan['state'] != 'cancelled' else 'cancelled',
+            'batch_id': plan['batch_id'],
+            'recovery_required': plan['state'] != 'cancelled',
+        }
+    if plan['state'] != 'ready':
+        return {'status': plan['batch_state'], 'batch_id': plan['batch_id'], 'recovery_required': plan['batch_state'] == 'unknown'}
+    if plan['batch_state'] == 'reserved':
+        return {'status': 'reserved', 'batch_id': plan['batch_id'], 'idempotent': True}
+    rows = _campaign_batch_recipient_rows(conn, plan_id)
+    if not rows or len(rows) > MAX_CAMPAIGN_PLAN_RECIPIENTS:
+        raise RuntimeError('Campaign batch recipient set is invalid.')
+
+    def lookup_and_project():
+        try:
+            response, status = _campaign_batch_adapter_call(
+                node_call, 'lookup', authenticated_worker_id,
+                f"/v1/users/{authenticated_worker_id}/campaign-batches/{plan['batch_id']}"
+            )
+        except Exception:
+            _set_campaign_batch_state(conn, plan_id, ('reserving',), 'unknown', now)
+            return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'NODE_LOOKUP_UNAVAILABLE'}
+        if status != 200 or not isinstance(response, dict) or response.get('success') is not True:
+            _set_campaign_batch_state(conn, plan_id, ('reserving',), 'unknown', now)
+            return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'NODE_LOOKUP_UNAVAILABLE'}
+        if response.get('found') is False:
+            return None
+        try:
+            validated = _validate_campaign_batch_response(plan, rows, response)
+            claim = next((r['reservation_claim_id'] for r in rows if r['reservation_claim_id']), None)
+            _project_campaign_batch(conn, plan_id, claim, validated, now)
+            return {'status': 'reserved', 'batch_id': plan['batch_id'], 'recovered': True}
+        except Exception:
+            _set_campaign_batch_state(conn, plan_id, ('reserving',), 'unknown', now)
+            return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'INVALID_NODE_BATCH_RESPONSE'}
+
+    if plan['batch_state'] in {'reserving', 'unknown'}:
+        recovered = lookup_and_project()
+        if recovered is not None:
+            return recovered
+
+    try:
+        claim = _claim_campaign_batch(
+            conn, plan_id, now,
+            allow_existing=plan['batch_state'] in {'reserving', 'unknown'},
+        )
+    except Exception:
+        return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'CLAIM_UNAVAILABLE'}
+    if claim.get('in_progress'):
+        return {'status': 'reserving', 'batch_id': plan['batch_id'], 'recovery_required': True}
+
+    items = []
+    for row in rows:
+        key = campaign_plan_recipient_idempotency_key(plan_id, row['id'])
+        items.append({
+            'position': row['position'], 'planRecipientId': row['id'],
+            'recipientJid': recipient_number_to_jid(row['recipient_number']),
+            'contentType': content_type, 'payloadReference': plan['content_reference'],
+        })
+    payload = {
+        'batchId': plan['batch_id'],
+        'requestFingerprint': plan['batch_request_fingerprint'],
+        'senderWorkerId': authenticated_worker_id,
+        'campaignId': plan['campaign_id'], 'taskId': plan['task_id'],
+        'planId': plan_id, 'items': items,
+    }
+    try:
+        response, status = _campaign_batch_adapter_call(
+            node_call, 'reserve', authenticated_worker_id,
+            f"/v1/users/{authenticated_worker_id}/campaign-batches/reserve", payload
+        )
+    except Exception:
+        _set_campaign_batch_state(conn, plan_id, ('reserving',), 'unknown', now)
+        return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'NODE_RESERVATION_UNAVAILABLE'}
+    if status == 409 and isinstance(response, dict) and response.get('status') == 'quota_exceeded':
+        try:
+            _project_campaign_batch_failure(conn, plan_id, claim['claim_id'], 'QUOTA_EXCEEDED', now)
+            return {'status': 'failed', 'batch_id': plan['batch_id'], 'failure_code': 'QUOTA_EXCEEDED'}
+        except Exception:
+            return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'PROJECTION_FAILED'}
+    try:
+        validated = _validate_campaign_batch_response(plan, rows, response)
+        _project_campaign_batch(conn, plan_id, claim['claim_id'], validated, now)
+        return {'status': 'reserved', 'batch_id': plan['batch_id'], 'reserved_count': len(validated)}
+    except Exception:
+        _set_campaign_batch_state(conn, plan_id, ('reserving',), 'unknown', now)
+        return {'status': 'unknown', 'batch_id': plan['batch_id'], 'recovery_required': True, 'error_code': 'INVALID_NODE_BATCH_RESPONSE'}
+
+
+def _validate_campaign_send_plan_for_dispatch(conn, plan_id, worker_id,
+                                              allow_terminal=False):
+    """Validate a reserved plan without accepting any browser-supplied payload."""
+    plan = _campaign_batch_plan_row(conn, plan_id)
+    if not plan or plan['sender_worker_id'] != worker_id:
+        raise PermissionError('Campaign plan ownership validation failed.')
+    task = conn.execute(
+        'SELECT * FROM tasks WHERE id = ?', (plan['task_id'],)
+    ).fetchone()
+    if not task or task['status'] != 'active' or task['task_type'] not in AUTOMATED_WHATSAPP_TASK_TYPES:
+        raise ValueError('Campaign is not available for sending.')
+    if not business_campaign_is_approved(conn, task):
+        raise ValueError('Campaign approval or recipient declaration is invalid.')
+    expected_content_type = 'image' if task['task_type'] == 'IMAGE_TEXT_LINK' else 'text'
+    expected_content_reference = f"task:{plan['task_id']}:{task['task_type'].lower()}:v1"
+    if (
+        plan['state'] != 'ready' or plan['batch_state'] != 'reserved' or
+        plan['cancellation_state'] != 'not_requested' or
+        not plan['batch_id'] or not plan['batch_request_fingerprint'] or
+        not plan['content_reference'] or plan['content_reference'] != expected_content_reference or
+        plan['batch_content_type'] != expected_content_type
+    ):
+        raise ValueError('Campaign reservation is not sendable.')
+    requested = plan['requested_quantity']
+    if requested is None or (requested != 'all' and (not requested.isdigit() or int(requested) < 1)):
+        raise ValueError('Campaign quantity is not persisted safely.')
+    rows = _campaign_batch_recipient_rows(conn, plan_id)
+    if not rows or len(rows) != plan['recipient_count']:
+        raise ValueError('Campaign recipient snapshot is invalid.')
+    if requested != 'all' and int(requested) != len(rows):
+        raise ValueError('Campaign quantity does not match the persisted recipient snapshot.')
+    expected_fingerprint = _campaign_batch_fingerprint(
+        plan['batch_id'], worker_id, plan['campaign_id'], plan['task_id'],
+        plan_id, rows, plan['content_reference'], plan['batch_content_type'],
+    )
+    if plan['batch_request_fingerprint'] != expected_fingerprint:
+        raise ValueError('Campaign batch fingerprint is invalid.')
+    claimed = conn.execute('''
+        SELECT COUNT(*) AS count
+        FROM whatsapp_campaign_recipient_claims
+        WHERE plan_id = ? AND state = 'claimed'
+    ''', (plan_id,)).fetchone()['count']
+    if claimed != len(rows):
+        raise ValueError('Campaign recipient claims are not intact.')
+    for row in rows:
+        expected_key = database.whatsapp_campaign_plan_recipient_idempotency_key(plan_id, row['id'])
+        if (
+            row['state'] not in ({'reserved', 'attempted', 'acknowledged', 'failed', 'delivered_unknown'} if allow_terminal else {'reserved'}) or
+            not row['ledger_message_id'] or
+            not database.is_valid_whatsapp_ledger_token(row['ledger_message_id']) or
+            row['idempotency_key'] != expected_key
+        ):
+            raise ValueError('Campaign recipient reservation is invalid.')
+    return plan, rows
+
+
+def _validate_campaign_send_response(plan, rows, response):
+    """Validate all Node send results before projecting any local outcomes."""
+    if not isinstance(response, dict) or response.get('success') is not True:
+        raise ValueError('Invalid campaign send response.')
+    if response.get('batch_id') != plan['batch_id'] or not isinstance(response.get('items'), list):
+        raise ValueError('Campaign send identity validation failed.')
+    items = response['items']
+    if len(items) != len(rows):
+        raise ValueError('Campaign send item count validation failed.')
+    by_position = {}
+    allowed = {'acknowledged', 'failed', 'uncertain', 'not_sendable'}
+    for item in items:
+        if not isinstance(item, dict) or item.get('position') in by_position:
+            raise ValueError('Campaign send item identity validation failed.')
+        if item.get('status') not in allowed or not isinstance(item.get('message_id'), str):
+            raise ValueError('Campaign send item result is invalid.')
+        by_position[item['position']] = item
+    validated = []
+    for row in rows:
+        item = by_position.get(row['position'])
+        if not item or item['message_id'] != row['ledger_message_id']:
+            raise ValueError('Campaign send item identity validation failed.')
+        validated.append((row, item))
+    return validated
+
+
+def _project_campaign_send_outcomes(conn, validated, now=None,
+                                    plan_id=None, dispatch_operation_id=None):
+    """Project only validated outcomes; never downgrade a terminal local state."""
+    now = _campaign_reservation_now(now)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        counts = {'acknowledged': 0, 'failed': 0, 'uncertain': 0, 'not_sendable': 0}
+        for row, item in validated:
+            status = item['status']
+            counts[status] += 1
+            if status == 'not_sendable':
+                continue
+            next_state = 'delivered_unknown' if status == 'uncertain' else status
+            current = conn.execute(
+                'SELECT state, ledger_message_id FROM whatsapp_campaign_plan_recipients WHERE id = ?',
+                (row['id'],),
+            ).fetchone()
+            if not current or current['ledger_message_id'] != row['ledger_message_id']:
+                raise RuntimeError('Campaign send projection identity changed.')
+            if current['state'] in {'acknowledged', 'failed', 'delivered_unknown'}:
+                if current['state'] != next_state:
+                    raise RuntimeError('Campaign send outcome conflicts with a terminal local state.')
+                continue
+            changed = conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET state = ?, updated_at = ?
+                WHERE id = ? AND ledger_message_id = ? AND state IN ('reserved', 'attempted')
+            ''', (next_state, now, row['id'], row['ledger_message_id']))
+            if changed.rowcount != 1:
+                raise RuntimeError('Campaign send projection lost ownership.')
+        if plan_id is not None:
+            changed = conn.execute('''
+                UPDATE whatsapp_campaign_plans
+                SET dispatch_state = 'complete', dispatch_started_at = COALESCE(dispatch_started_at, ?)
+                WHERE id = ? AND dispatch_state IN ('in_progress', 'unknown')
+                  AND dispatch_operation_id = ?
+            ''', (now, plan_id, dispatch_operation_id))
+            if changed.rowcount != 1:
+                raise RuntimeError('Campaign dispatch ownership changed.')
+        conn.commit()
+        return counts
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _claim_campaign_dispatch(conn, plan_id, worker_id, now):
+    operation_id = secrets.token_urlsafe(24)
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        plan = _campaign_batch_plan_row(conn, plan_id)
+        if not plan or plan['sender_worker_id'] != worker_id:
+            raise PermissionError('Campaign plan ownership validation failed.')
+        if plan['dispatch_state'] != 'not_started':
+            conn.commit()
+            return {'claimed': False, 'state': plan['dispatch_state'], 'operation_id': plan['dispatch_operation_id']}
+        changed = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET dispatch_state = 'in_progress', dispatch_operation_id = ?,
+                dispatch_started_at = ?
+            WHERE id = ? AND sender_worker_id = ?
+              AND state = 'ready' AND batch_state = 'reserved'
+              AND cancellation_state = 'not_requested'
+              AND dispatch_state = 'not_started'
+        ''', (operation_id, now, plan_id, worker_id))
+        if changed.rowcount != 1:
+            conn.commit()
+            return {'claimed': False, 'state': 'in_progress', 'operation_id': None}
+        conn.commit()
+        return {'claimed': True, 'state': 'in_progress', 'operation_id': operation_id}
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _mark_campaign_dispatch_unknown(conn, plan_id, operation_id, now):
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        changed = conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET dispatch_state = 'unknown', dispatch_started_at = COALESCE(dispatch_started_at, ?)
+            WHERE id = ? AND dispatch_state = 'in_progress'
+              AND dispatch_operation_id = ?
+        ''', (now, plan_id, operation_id))
+        conn.commit()
+        return changed.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _campaign_dispatch_recovery(conn, plan, rows, worker_id, node_call, now):
+    """Recover terminal Node outcomes without ever calling the send endpoint."""
+    try:
+        response, status = _campaign_batch_adapter_call(
+            node_call, 'lookup', worker_id,
+            f"/v1/users/{worker_id}/campaign-batches/{plan['batch_id']}",
+        )
+        if status != 200 or not isinstance(response, dict) or response.get('success') is not True or response.get('found') is not True:
+            return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False}
+        batch = response.get('batch')
+        items = response.get('items')
+        if not isinstance(batch, dict) or not isinstance(items, list):
+            raise ValueError('Invalid campaign recovery response.')
+        for field, expected in {
+            'batch_id': plan['batch_id'],
+            'request_fingerprint': plan['batch_request_fingerprint'],
+            'sender_worker_id': worker_id,
+            'campaign_id': plan['campaign_id'],
+            'task_id': plan['task_id'],
+            'plan_id': plan['id'],
+            'item_count': len(rows),
+        }.items():
+            if batch.get(field) != expected:
+                raise ValueError('Campaign recovery identity validation failed.')
+        if len(items) != len(rows):
+            raise ValueError('Campaign recovery item count validation failed.')
+        by_position = {item.get('position'): item for item in items if isinstance(item, dict)}
+        if len(by_position) != len(items):
+            raise ValueError('Campaign recovery item identity validation failed.')
+        validated = []
+        for row in rows:
+            item = by_position.get(row['position'])
+            if not item or item.get('message_id') != row['ledger_message_id']:
+                raise ValueError('Campaign recovery item identity validation failed.')
+            state = item.get('state')
+            if state not in {'acknowledged', 'failed', 'delivered_unknown'}:
+                return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False}
+            validated.append((row, {'status': 'uncertain' if state == 'delivered_unknown' else state, 'message_id': item['message_id']}))
+        counts = _project_campaign_send_outcomes(
+            conn, validated, now=now, plan_id=plan['id'],
+            dispatch_operation_id=plan['dispatch_operation_id'],
+        )
+        if counts['failed']:
+            return {'status': 'completed_with_failures', 'delivered': False, **counts}
+        if counts['uncertain']:
+            return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False, **counts}
+        return {'status': 'acknowledged', 'delivered': False, **counts}
+    except Exception:
+        return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False}
+
+
+def _evaluate_recipients_consent(conn, recipients):
+    """Evaluate recipient consent and opt-out status.
+
+    Returns (is_valid, error_message).
+    - If any recipient is opted out, is_valid is False and error_message identifies opted-out numbers.
+    - If any recipient is missing a shop declaration ('shop_attested'), is_valid is False.
+    - If all recipients have a valid shop declaration and are not opted out, is_valid is True.
+    """
+    if not recipients:
+        return True, None
+    res = database.check_recipients_consent_and_opt_out(conn, recipients)
+    if res['opted_out']:
+        return False, f"Recipients opted out: {res['opted_out']}"
+    if res['unattested']:
+        return False, f"Recipients missing shop declaration consent: {res['unattested']}"
+    return True, None
+
+
+def _validate_campaign_consent_declaration_for_dispatch(conn, plan, rows):
+    """Require an immutable declaration for the complete source audience.
+
+    Planned recipients may be a strict subset when eligibility excluded
+    recorded opt-outs, but every planned recipient must remain declared and
+    non-opted-out. Missing, changed, malformed, or opted-out data fails closed.
+    """
+    if not hasattr(conn, 'execute') or not plan or not rows:
+        return False
+    try:
+        task_id = plan['task_id']
+        campaign_id = plan['campaign_id']
+        declaration = database.get_whatsapp_campaign_consent_declaration(conn, task_id, campaign_id)
+        if not declaration:
+            return False
+        if declaration['declaration_text'] != database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT:
+            return False
+        declared = json.loads(declaration['normalized_recipient_list'])
+        if not isinstance(declared, list) or any(not isinstance(item, str) for item in declared):
+            return False
+        task = conn.execute(
+            'SELECT * FROM tasks WHERE id = ? AND (campaign_id = ? OR campaign_id IS NULL)',
+            (task_id, campaign_id),
+        ).fetchone()
+        source_recipients = task_recipient_pool(task) if task else None
+        if not task or sorted(source_recipients) != declared:
+            return False
+        if (task['owner_user_id'] is not None and
+                (declaration['business_user_id'] != task['owner_user_id'] or
+                 declaration['campaign_id'] != (task['campaign_id'] or task['id']))):
+            return False
+        if declaration['recipient_count'] != len(source_recipients):
+            return False
+        encoded = json.dumps(sorted(set(source_recipients)), ensure_ascii=False, separators=(',', ':'))
+        fingerprint = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+        if (declaration['recipient_fingerprint'] != fingerprint or
+                plan['recipient_fingerprint'] != fingerprint):
+            return False
+        recipients = [row['recipient_number'] for row in rows]
+        if (not recipients or any(not isinstance(item, str) for item in recipients)
+                or len(recipients) != len(set(recipients))
+                or any(item not in declared for item in recipients)):
+            return False
+        opted_out_keys = _authoritative_whatsapp_opt_out_keys(conn)
+        return not any(_opt_out_lookup_keys(item) & opted_out_keys for item in recipients)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
+        return False
+
+
+def send_reserved_whatsapp_campaign_batch(conn, plan_id, worker_id,
+                                           node_call=None, now=None):
+    """Send an already-reserved batch through Node; no quota reservation occurs here."""
+    if not WHATSAPP_CONSENT_GATE_AVAILABLE:
+        return {'status': 'consent_required', 'recovery_required': False, 'delivered': False}
+    if isinstance(worker_id, bool) or not isinstance(worker_id, int) or worker_id < 1:
+        raise PermissionError('Authenticated worker is required.')
+    now = _campaign_reservation_now(now)
+    plan = _campaign_batch_plan_row(conn, plan_id)
+    if not plan or plan['sender_worker_id'] != worker_id:
+        raise PermissionError('Campaign plan ownership validation failed.')
+    if plan['dispatch_state'] in {'in_progress', 'unknown'}:
+        rows = _campaign_batch_recipient_rows(conn, plan_id)
+        _validate_campaign_send_plan_for_dispatch(conn, plan_id, worker_id, allow_terminal=True)
+        return _campaign_dispatch_recovery(conn, plan, rows, worker_id, node_call, now)
+    if plan['dispatch_state'] == 'complete':
+        return {'status': 'already_processed', 'delivered': False}
+    plan, rows = _validate_campaign_send_plan_for_dispatch(conn, plan_id, worker_id)
+    if hasattr(conn, 'execute') and not _validate_campaign_consent_declaration_for_dispatch(conn, plan, rows):
+        return {'status': 'consent_required', 'recovery_required': False, 'delivered': False}
+    claim = _claim_campaign_dispatch(conn, plan_id, worker_id, now)
+    if not claim['claimed']:
+        refreshed = _campaign_batch_plan_row(conn, plan_id)
+        if refreshed['dispatch_state'] in {'in_progress', 'unknown'}:
+            return _campaign_dispatch_recovery(conn, refreshed, rows, worker_id, node_call, now)
+        return {'status': 'already_processed', 'delivered': False}
+    operation_id = claim['operation_id']
+
+    def uncertain_result():
+        try:
+            _mark_campaign_dispatch_unknown(conn, plan_id, operation_id, now)
+        except Exception:
+            # The in-progress durable claim remains non-dispatchable even if
+            # recording the more specific unknown state fails.
+            return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False}
+        return {'status': 'recovery_required', 'recovery_required': True, 'delivered': False}
+    # Recheck the immutable declaration and opt-out list after the durable claim,
+    # immediately before authorization/request creation.  A failed recheck is
+    # made non-dispatchable rather than returning the batch to the queue.
+    if hasattr(conn, 'execute') and not _validate_campaign_consent_declaration_for_dispatch(conn, plan, rows):
+        return uncertain_result()
+    try:
+        authorization_token = create_dispatch_authorization_token(
+            plan, worker_id, WHATSAPP_SERVICE_SHARED_SECRET, now=now, operation_id=operation_id,
+        )
+    except Exception:
+        return uncertain_result()
+    try:
+        response, status = _campaign_batch_adapter_call(
+            node_call, 'send', worker_id,
+            f"/v1/users/{worker_id}/campaign-batches/{plan['batch_id']}" + '/send',
+            extra_headers={'X-TaskPe-Dispatch-Authorization': authorization_token},
+        )
+    except Exception:
+        return uncertain_result()
+    if status != 200:
+        return uncertain_result()
+    try:
+        validated = _validate_campaign_send_response(plan, rows, response)
+        counts = _project_campaign_send_outcomes(
+            conn, validated, now=now, plan_id=plan_id,
+            dispatch_operation_id=operation_id,
+        )
+    except Exception:
+        return uncertain_result()
+    if counts['uncertain'] or counts['not_sendable']:
+        result = uncertain_result()
+        result.update(counts)
+        return result
+    if counts['failed']:
+        return {'status': 'completed_with_failures', 'delivered': False, **counts}
+    return {'status': 'acknowledged', 'delivered': False, **counts}
 
 def get_assigned_numbers(assignment):
     try:
         return json.loads(assignment['assigned_numbers'])
     except Exception:
         return []
+
+
+def create_assignment_send_plan(conn, assignment_id, sender_worker_id,
+                                plan_key, selected_recipients=None):
+    """Atomically create a deterministic campaign plan strictly from an assignment's allocated recipients."""
+    if isinstance(sender_worker_id, bool) or not isinstance(sender_worker_id, int) or sender_worker_id < 1:
+        raise ValueError('A valid sender worker is required.')
+    if isinstance(assignment_id, bool) or not isinstance(assignment_id, int) or assignment_id < 1:
+        raise ValueError('A valid assignment identity is required.')
+    if not isinstance(plan_key, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', plan_key):
+        raise ValueError('A valid plan key is required.')
+
+    assignment = conn.execute('''
+        SELECT ta.id AS assignment_id, ta.user_id, ta.task_id, ta.campaign_id,
+               ta.assigned_numbers, ta.status AS assignment_status, ta.expires_at,
+               t.id AS t_id, t.title, t.task_type, t.template_text, t.destination_link,
+               t.image_path, t.recipient_region, t.status AS task_status,
+               t.target_numbers,
+               t.campaign_id AS task_campaign_id, t.owner_user_id,
+               t.campaign_review_status, t.campaign_approval_fingerprint
+        FROM task_assignments ta
+        JOIN tasks t ON t.id = ta.task_id
+        WHERE ta.id = ?
+    ''', (assignment_id,)).fetchone()
+
+    if not assignment:
+        raise ValueError('Assignment not found.')
+    if assignment['user_id'] != sender_worker_id:
+        raise PermissionError('Assignment does not belong to the authenticated worker.')
+    if assignment['assignment_status'] != 'in_progress':
+        raise ValueError(f'Assignment is not in progress (status: {assignment["assignment_status"]}).')
+    if assignment['expires_at']:
+        exp_row = conn.execute("SELECT 1 WHERE datetime(?) <= CURRENT_TIMESTAMP", (assignment['expires_at'],)).fetchone()
+        if exp_row:
+            raise ValueError('Assignment has expired.')
+    if assignment['task_status'] != 'active':
+        raise ValueError('Task is not active.')
+    if not business_campaign_is_approved(conn, assignment):
+        raise ValueError('Business campaign requires administrator approval.')
+    source_fingerprint = _campaign_recipient_fingerprint(task_recipient_pool(assignment))
+
+    task_type = assignment['task_type'] or ''
+    if 'VIDEO' in task_type.upper():
+        raise ValueError('Unsupported video content: video sending is not supported.')
+    if task_type not in AUTOMATED_WHATSAPP_TASK_TYPES:
+        raise ValueError(f'Task type {task_type} is not supported for automated WhatsApp sending.')
+
+    content_type = 'image' if task_type == 'IMAGE_TEXT_LINK' else 'text'
+    content_reference = f"task:{assignment['task_id']}:{task_type.lower()}:v1"
+    campaign_id = assignment['campaign_id'] or assignment['task_id']
+
+    assigned_raw = get_assigned_numbers(assignment)
+    if not assigned_raw or not isinstance(assigned_raw, list):
+        raise ValueError('Assignment has no assigned recipients.')
+    assigned_numbers = [normalize_phone_number(n, region=assignment['recipient_region']) for n in assigned_raw]
+    assigned_numbers = [number for number in assigned_numbers if number]
+    if not assigned_numbers:
+        raise ValueError('Assignment has no valid assigned recipient numbers.')
+    assigned_set = set(assigned_numbers)
+
+    if selected_recipients is not None:
+        if not isinstance(selected_recipients, list) or len(selected_recipients) == 0:
+            raise ValueError('Selected recipients must be a non-empty list.')
+        selected_normalized = []
+        for r in selected_recipients:
+            norm_r = normalize_phone_number(r, region=assignment['recipient_region'])
+            if not norm_r:
+                raise ValueError(f'Invalid recipient number: {r}')
+            if norm_r not in assigned_set:
+                raise ValueError(f'Recipient {r} is outside the assigned numbers.')
+            selected_normalized.append(norm_r)
+        seen = set()
+        recipients = []
+        for r in selected_normalized:
+            if r not in seen:
+                seen.add(r)
+                recipients.append(r)
+    else:
+        recipients = list(assigned_numbers)
+
+    if len(recipients) > MAX_CAMPAIGN_PLAN_RECIPIENTS:
+        raise ValueError(f'Campaign plans are limited to {MAX_CAMPAIGN_PLAN_RECIPIENTS} recipients.')
+
+    placeholders = ','.join('?' for _ in recipients)
+    allocated_rows = conn.execute(f'''
+        SELECT phone_number, status, user_id, assignment_id
+        FROM recipient_allocations
+        WHERE campaign_id = ? AND assignment_id = ? AND user_id = ?
+          AND phone_number IN ({placeholders})
+    ''', (campaign_id, assignment_id, sender_worker_id, *recipients)).fetchall()
+
+    allocated_map = {row['phone_number']: row['status'] for row in allocated_rows}
+    for r in recipients:
+        if r not in allocated_map:
+            raise ValueError(f'Recipient {r} does not have an allocation row for this assignment.')
+        if allocated_map[r] != 'ALLOCATED':
+            raise ValueError(f'Recipient {r} is not in ALLOCATED state (status: {allocated_map[r]}).')
+
+    request_fingerprint = hashlib.sha256(json.dumps({
+        'assignment_id': assignment_id,
+        'task_id': assignment['task_id'],
+        'campaign_id': campaign_id,
+        'sender_worker_id': sender_worker_id,
+        'content_reference': content_reference,
+        'recipients': recipients,
+    }, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        existing = conn.execute('''
+            SELECT id, request_fingerprint, recipient_fingerprint, task_id, campaign_id, sender_worker_id,
+                   recipient_count, requested_quantity, state, batch_id,
+                   batch_request_fingerprint, batch_content_type, batch_state,
+                   created_at
+            FROM whatsapp_campaign_plans WHERE plan_key = ?
+        ''', (plan_key,)).fetchone()
+
+        if existing:
+            if (existing['request_fingerprint'] != request_fingerprint or
+                    existing['recipient_fingerprint'] != source_fingerprint):
+                raise ValueError('Plan key is already used for a different request.')
+            conn.commit()
+            return {
+                'created': False,
+                'idempotent': True,
+                'plan_id': existing['id'],
+                'state': existing['state'],
+                'recipient_count': existing['recipient_count'],
+                'requested_quantity': existing['requested_quantity'],
+                'batch_id': existing['batch_id'],
+                'batch_request_fingerprint': existing['batch_request_fingerprint'],
+                'batch_content_type': existing['batch_content_type'],
+                'batch_state': existing['batch_state'],
+                'created_at': existing['created_at'],
+            }
+
+        claimed = conn.execute(f'''
+            SELECT recipient_number FROM whatsapp_campaign_recipient_claims
+            WHERE campaign_id = ? AND state = 'claimed' AND recipient_number IN ({placeholders})
+        ''', (campaign_id, *recipients)).fetchall()
+        if claimed:
+            claimed_nums = [r['recipient_number'] for r in claimed]
+            raise ValueError(f'Recipients already claimed by another active plan: {claimed_nums}')
+
+        cursor = conn.execute('''
+            INSERT INTO whatsapp_campaign_plans
+                (plan_key, request_fingerprint, recipient_fingerprint, task_id, campaign_id,
+                 sender_worker_id, content_reference, recipient_count,
+                 requested_quantity, state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating')
+        ''', (
+            plan_key, request_fingerprint, source_fingerprint, assignment['task_id'], campaign_id,
+            sender_worker_id, content_reference, len(recipients), str(len(recipients)),
+        ))
+        plan_id = cursor.lastrowid
+
+        conn.executemany('''
+            INSERT INTO whatsapp_campaign_plan_recipients
+                (plan_id, recipient_number, position, idempotency_key)
+            VALUES (?, ?, ?, ?)
+        ''', [
+            (plan_id, recipient, pos, f'pending:{plan_id}:{pos}')
+            for pos, recipient in enumerate(recipients, start=1)
+        ])
+
+        for row in conn.execute('''
+            SELECT id, plan_id FROM whatsapp_campaign_plan_recipients
+            WHERE plan_id = ? ORDER BY position
+        ''', (plan_id,)).fetchall():
+            conn.execute('''
+                UPDATE whatsapp_campaign_plan_recipients
+                SET idempotency_key = ? WHERE id = ?
+            ''', (
+                database.whatsapp_campaign_plan_recipient_idempotency_key(row['plan_id'], row['id']),
+                row['id'],
+            ))
+
+        recipient_rows = conn.execute('''
+            SELECT id, recipient_number, position FROM whatsapp_campaign_plan_recipients
+            WHERE plan_id = ? ORDER BY position
+        ''', (plan_id,)).fetchall()
+
+        batch_id = _campaign_batch_id(plan_id)
+        batch_fingerprint = _campaign_batch_fingerprint(
+            batch_id, sender_worker_id, campaign_id, assignment['task_id'],
+            plan_id, recipient_rows, content_reference, content_type,
+        )
+
+        conn.execute('''
+            UPDATE whatsapp_campaign_plans
+            SET batch_id = ?, batch_request_fingerprint = ?,
+                batch_content_type = ?, batch_state = 'pending',
+                batch_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND batch_id IS NULL
+        ''', (batch_id, batch_fingerprint, content_type, plan_id))
+
+        conn.executemany('''
+            INSERT INTO whatsapp_campaign_recipient_claims
+                (campaign_id, task_id, recipient_number, plan_id, plan_recipient_id, state)
+            VALUES (?, ?, ?, ?, ?, 'claimed')
+        ''', [
+            (campaign_id, assignment['task_id'], row['recipient_number'], plan_id, row['id'])
+            for row in recipient_rows
+        ])
+
+        conn.execute('''
+            UPDATE whatsapp_campaign_plans SET state = 'ready' WHERE id = ? AND state = 'creating'
+        ''', (plan_id,))
+
+        if conn.execute('SELECT changes() AS count').fetchone()['count'] != 1:
+            raise RuntimeError('Unable to finalize assignment send plan.')
+        conn.commit()
+
+        return {
+            'created': True,
+            'idempotent': False,
+            'plan_id': plan_id,
+            'state': 'ready',
+            'recipient_count': len(recipients),
+            'requested_quantity': str(len(recipients)),
+            'batch_id': batch_id,
+            'batch_request_fingerprint': batch_fingerprint,
+            'batch_content_type': content_type,
+            'batch_state': 'pending',
+        }
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def send_assignment_whatsapp_batch(conn, assignment_id, worker_id, task_id=None,
+                                   plan_key=None, selected_recipients=None,
+                                   node_call=None, now=None):
+    """Execute reservation and sending for an assignment-bound WhatsApp batch.
+
+    Validates assignment ownership, task binding, status, expiry, content, and allocations.
+    Uses reservation first, recovering uncertain reservation by status lookup.
+    Uses Node send endpoint only after confirmed reservation.
+    Recovers uncertain send outcomes by status lookup without blind retries.
+    """
+    if not WHATSAPP_CONSENT_GATE_AVAILABLE:
+        return {
+            'success': False,
+            'status': 'consent_required',
+            'recovery_required': False,
+            'delivered': False,
+            'message': 'WhatsApp sending is unavailable until consent and opt-out enforcement is implemented.',
+        }
+    if isinstance(worker_id, bool) or not isinstance(worker_id, int) or worker_id < 1:
+        raise PermissionError('Authenticated worker is required.')
+    if isinstance(assignment_id, bool) or not isinstance(assignment_id, int) or assignment_id < 1:
+        raise ValueError('A valid assignment identity is required.')
+
+    plan_key = plan_key or f"assignment-send-{assignment_id}"
+    if not isinstance(plan_key, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', plan_key):
+        raise ValueError('A valid idempotency key is required.')
+
+    # Verify task_id matches if provided
+    if task_id is not None:
+        if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 1:
+            raise ValueError('A valid task identity is required.')
+        assignment_check = conn.execute(
+            'SELECT task_id, user_id FROM task_assignments WHERE id = ?', (assignment_id,)
+        ).fetchone()
+        if not assignment_check:
+            raise ValueError('Assignment not found.')
+        if assignment_check['user_id'] != worker_id:
+            raise PermissionError('Assignment does not belong to the authenticated worker.')
+        if assignment_check['task_id'] != task_id:
+            raise ValueError('Assignment does not match requested task.')
+
+    # Create or retrieve assignment plan
+    plan = create_assignment_send_plan(
+        conn, assignment_id, worker_id, plan_key,
+        selected_recipients=selected_recipients,
+    )
+
+    # Ensure session contains authenticated worker ID for internal node helpers
+    try:
+        if session.get('user_id') != worker_id:
+            session['user_id'] = worker_id
+    except RuntimeError:
+        pass
+
+    # Check quota if not already reserved
+    if plan['batch_state'] not in {'reserved'}:
+        quota = _worker_whatsapp_quota_status(worker_id)
+        if quota.get('status') != 'available':
+            return {
+                'success': False,
+                'status': 'quota_unavailable',
+                'message': 'Daily WhatsApp quota is currently unavailable. Please try again later.',
+            }
+        if plan['recipient_count'] > quota.get('remaining', 0):
+            return {
+                'success': False,
+                'status': 'quota_exceeded',
+                'message': 'The requested quantity exceeds the remaining daily quota.',
+            }
+
+    # Reserve with Node
+    content_type = plan['batch_content_type'] or 'text'
+    reservation = reserve_campaign_send_plan_with_node(
+        conn, plan['plan_id'], node_call=node_call, now=now, content_type=content_type,
+    )
+    if reservation.get('status') == 'failed':
+        failure_code = reservation.get('failure_code')
+        if failure_code == 'QUOTA_EXCEEDED':
+            return {
+                'success': False,
+                'status': 'quota_exceeded',
+                'message': 'The daily WhatsApp quota was exhausted before reservation completed.',
+            }
+        return {
+            'success': False,
+            'status': 'reservation_failed',
+            'message': 'Campaign batch reservation failed.',
+        }
+
+    if reservation.get('status') != 'reserved':
+        # Uncertain reservation: attempt recovery lookup
+        recovery = reserve_campaign_send_plan_with_node(
+            conn, plan['plan_id'], node_call=node_call, now=now, content_type=content_type,
+        )
+        if recovery.get('status') != 'reserved':
+            return {
+                'success': False,
+                'status': 'recovery_required',
+                'recovery_required': True,
+                'delivered': False,
+                'message': 'Reservation status is uncertain. No message was sent; please retry recovery later.',
+            }
+
+    # Send reserved batch
+    send_result = send_reserved_whatsapp_campaign_batch(
+        conn, plan['plan_id'], worker_id, node_call=node_call, now=now,
+    )
+
+    if send_result.get('status') == 'recovery_required':
+        # If uncertain, query status lookup via send_reserved_whatsapp_campaign_batch again
+        recovered = send_reserved_whatsapp_campaign_batch(
+            conn, plan['plan_id'], worker_id, node_call=node_call, now=now,
+        )
+        return {
+            'success': False if recovered.get('status') == 'recovery_required' else True,
+            'status': recovered.get('status'),
+            'recovery_required': recovered.get('recovery_required', False),
+            'delivered': False,
+            **recovered,
+        }
+
+    is_success = send_result.get('status') in {'acknowledged', 'completed_with_failures', 'already_processed'}
+    return {
+        'success': is_success,
+        'status': send_result.get('status'),
+        'delivered': False,
+        **send_result,
+    }
 
 def get_setting_number(conn, key, default):
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -613,11 +2624,11 @@ def valid_usdt_address(network, address):
 
 def calculate_task_payout(conn, task, recipient_count=None):
     """Return the task's immutable per-recipient reward times assigned recipients."""
-    count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task)))
+    count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task, allow_legacy=True)))
     return float(paise_to_inr(calculate_task_payout_paise(conn, task, count)))
 
 def calculate_task_payout_paise(conn, task, recipient_count=None):
-    count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task)))
+    count = recipient_count if recipient_count is not None else (task['recipients_per_slot'] or len(task_recipient_pool(task, allow_legacy=True)))
     rate_paise = task.get('reward_per_number_paise') if isinstance(task, dict) else None
     if rate_paise is None and hasattr(task, 'keys') and 'reward_per_number_paise' in task.keys():
         rate_paise = task['reward_per_number_paise']
@@ -703,6 +2714,27 @@ def finalize_target_records_for_approval(conn, assignment_id, approved_count, pa
                 WHERE id = ? AND status IN ('assigned', 'verified')
             ''', (record['id'],))
 
+def _target_record_lookup_key(value):
+    """Return the storage key used by target_number_records.
+
+    Target records predate the public E.164 recipient contract and store a
+    digit-only lookup key.  Convert valid E.164 input to that key, while also
+    accepting an already-canonical persisted key for legacy callers.  This is
+    a record-selection helper only; it does not authorize or send to a
+    recipient, and it deliberately does not guess a country code.
+    """
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    canonical = normalize_phone_number(raw)
+    if canonical:
+        return database.normalize_legacy_target_number(canonical)
+    digits = database.normalize_legacy_target_number(raw)
+    if raw == digits and 8 <= len(digits) <= 15:
+        return digits
+    return ''
+
+
 def get_reusable_target_numbers(conn, campaign_id=None, candidate_numbers=None, user_id=None, limit=None):
     """Return deterministic remaining targets that can be assigned again.
 
@@ -712,7 +2744,10 @@ def get_reusable_target_numbers(conn, campaign_id=None, candidate_numbers=None, 
     """
     candidate_set = None
     if candidate_numbers is not None:
-        candidate_set = {normalize_phone_number(number) for number in candidate_numbers if normalize_phone_number(number)}
+        candidate_set = {
+            lookup_key for number in candidate_numbers
+            if (lookup_key := _target_record_lookup_key(number))
+        }
     rows = conn.execute('''
         SELECT id, normalized_target_number, target_number
         FROM target_number_records
@@ -845,6 +2880,291 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def business_campaign_required(f):
+    """Require a server-assigned business role for campaign mutations/views.
+
+    Administrators retain access for existing operational workflows; ordinary
+    authenticated workers do not gain business privileges merely by logging in.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = get_current_user()
+        if not session.get('user_id'):
+            return jsonify({'success': False, 'message': 'Authentication required. Please log in.'}), 401
+        if not user or user['role'] not in {'business', 'admin'}:
+            return jsonify({'success': False, 'message': 'Business campaign privileges required.'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+def _whatsapp_feature_disabled_response():
+    return jsonify({
+        'success': False,
+        'message': 'Linked-device WhatsApp integration is disabled.'
+    }), 404
+
+def _validated_whatsapp_service_url():
+    """Return the approved loopback base URL or fail closed."""
+    try:
+        parsed = urllib.parse.urlsplit(WHATSAPP_SERVICE_URL)
+        configured_port = int(os.environ.get('TASKPE_WA_SERVICE_PORT', '8765'))
+        port = parsed.port
+        hostname = parsed.hostname
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= configured_port <= 65535):
+        return None
+    if (
+        parsed.scheme != 'http'
+        or hostname != '127.0.0.1'
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {'', '/'}
+        or parsed.query
+        or parsed.fragment
+        or port != configured_port
+    ):
+        return None
+    return f'http://127.0.0.1:{configured_port}'
+
+def _call_whatsapp_service(method, path, user_id, payload=None, extra_headers=None, allow_when_disabled=False):
+    """Call the localhost-only prototype service with an authenticated HMAC request."""
+    if not WHATSAPP_LINKED_DEVICE_ENABLED and WHATSAPP_TEST_TRANSPORT_ENABLED and not allow_when_disabled:
+        return {'success': False, 'message': 'A test WhatsApp transport must be injected.'}, 503
+    if not whatsapp_feature_enabled() and not allow_when_disabled:
+        return {'success': False, 'message': 'Linked-device WhatsApp integration is disabled.'}, 404
+    if not WHATSAPP_SERVICE_SHARED_SECRET:
+        logger.error('WhatsApp service secret is not configured.')
+        return {'success': False, 'message': 'WhatsApp service is not configured.'}, 503
+    service_base_url = _validated_whatsapp_service_url()
+    if not service_base_url:
+        logger.error('WhatsApp service URL failed local allowlist validation.')
+        return {'success': False, 'message': 'WhatsApp service is unavailable.'}, 503
+
+    method = method.upper()
+    body_text = json.dumps(payload, separators=(',', ':')) if payload is not None else ''
+    timestamp = str(int(time.time()))
+    request_id = secrets.token_urlsafe(32)
+    signing_value = f'{timestamp}.{request_id}.{method}.{path}.{body_text}'.encode('utf-8')
+    signature = hmac.new(
+        WHATSAPP_SERVICE_SHARED_SECRET.encode('utf-8'),
+        signing_value,
+        hashlib.sha256,
+    ).hexdigest()
+    request_data = body_text.encode('utf-8') if body_text else None
+    headers = {
+        'Accept': 'application/json',
+        'X-TaskPe-Timestamp': timestamp,
+        'X-TaskPe-Request-ID': request_id,
+        'X-TaskPe-Signature': signature,
+        'X-TaskPe-User-ID': str(user_id),
+        **({'Content-Type': 'application/json'} if request_data else {}),
+        **(extra_headers or {}),
+    }
+    service_request = urllib.request.Request(
+        f'{service_base_url}{path}',
+        data=request_data,
+        method=method,
+        headers=headers,
+    )
+    try:
+        with _WHATSAPP_SERVICE_OPENER.open(service_request, timeout=WHATSAPP_SERVICE_TIMEOUT_SECONDS) as response:
+            raw = response.read(256 * 1024).decode('utf-8', errors='replace')
+            status = int(getattr(response, 'status', response.getcode()))
+        result = json.loads(raw) if raw else {'success': status < 400}
+        if not isinstance(result, dict):
+            result = {'success': False, 'message': 'Invalid WhatsApp service response.'}
+        return result, status
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(256 * 1024).decode('utf-8', errors='replace')
+            result = json.loads(raw) if raw else {}
+        except (OSError, ValueError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        result.setdefault('success', False)
+        result.setdefault('message', 'WhatsApp service rejected the request.')
+        return result, int(exc.code)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        logger.warning(
+            'WhatsApp service request failed: method=%s path=%s error=%s',
+            method, path, type(exc).__name__,
+        )
+        return {'success': False, 'message': 'WhatsApp service is unavailable.'}, 503
+
+def _require_whatsapp_csrf():
+    """Require the existing session CSRF token for linked-device mutations."""
+    expected = session.get('_csrf_token')
+    supplied = request.headers.get('X-CSRF-Token')
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        return jsonify({'success': False, 'message': 'Invalid CSRF token.'}), 403
+    return None
+
+@app.route('/api/whatsapp/opt-outs', methods=['POST'])
+@admin_required
+def register_whatsapp_opt_out():
+    """Register an admin/support platform-wide opt-out through Node first.
+
+    There is no business-recipient ownership relation in the current schema,
+    so ordinary users cannot submit this global suppression. The Flask table is
+    only a compatibility mirror and is written after Node durably accepts it.
+    """
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'message': 'Authentication required.'}), 401
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'Invalid opt-out request.'}), 400
+    try:
+        phone_number = database.normalize_recipient_number(data.get('phone_number'), region=data.get('region'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'A valid international phone number is required.'}), 400
+    reason = data.get('reason', 'user_opt_out')
+    request_id = data.get('request_id') or f"optout-{secrets.token_urlsafe(24)}"
+    if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', request_id):
+        return jsonify({'success': False, 'message': 'Invalid opt-out request ID.'}), 400
+    if not isinstance(reason, str) or not 1 <= len(reason) <= 200 or any(ord(ch) < 32 or ord(ch) == 127 for ch in reason):
+        return jsonify({'success': False, 'message': 'Invalid opt-out reason.'}), 400
+
+    conn = database.get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        existing = conn.execute(
+            'SELECT request_id, actor_user_id, phone_number, reason, state FROM whatsapp_opt_out_operations WHERE request_id = ?',
+            (request_id,),
+        ).fetchone()
+        if existing:
+            if (existing['actor_user_id'] != user['id'] or existing['phone_number'] != phone_number or existing['reason'] != reason):
+                conn.rollback()
+                return jsonify({'success': False, 'message': 'Opt-out request conflicts with an existing request.'}), 409
+            if existing['state'] == 'applied':
+                conn.rollback()
+                return jsonify({'success': True, 'status': 'already_applied', 'request_id': request_id}), 200
+        else:
+            conn.execute('''
+                INSERT INTO whatsapp_opt_out_operations
+                    (request_id, actor_user_id, phone_number, reason, state)
+                VALUES (?, ?, ?, ?, 'pending')
+            ''', (request_id, user['id'], phone_number, reason))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        return jsonify({'success': False, 'message': 'Opt-out request could not be recorded.'}), 503
+    finally:
+        conn.close()
+
+    result, status = _call_whatsapp_service(
+        'POST', f'/v1/users/{user["id"]}/coordination/opt-outs', user['id'], {
+            'requestId': request_id,
+            'recipientE164': phone_number,
+            'actorPrincipalId': user['id'],
+            'scope': 'platform',
+            'reason': reason,
+        }, allow_when_disabled=True,
+    )
+    node_confirmed = status == 200 and isinstance(result, dict) and result.get('success') is True and result.get('request_id') == request_id
+    conn = database.get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        if not node_confirmed:
+            conn.execute("UPDATE whatsapp_opt_out_operations SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE request_id = ? AND actor_user_id = ?", ('unknown' if status >= 500 else 'failed', request_id, user['id']))
+            conn.commit()
+            return jsonify({'success': False, 'status': 'recovery_required' if status >= 500 else 'rejected', 'request_id': request_id, 'message': 'Opt-out coordination is unavailable.' if status >= 500 else 'Opt-out was not accepted.'}), (503 if status >= 500 else 409)
+        database.record_whatsapp_opt_out(conn, phone_number, reason=reason, region=None)
+        updated = conn.execute("UPDATE whatsapp_opt_out_operations SET state = 'applied', updated_at = CURRENT_TIMESTAMP WHERE request_id = ? AND actor_user_id = ?", (request_id, user['id']))
+        if updated.rowcount != 1:
+            raise RuntimeError('Opt-out operation ownership changed.')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        return jsonify({'success': False, 'status': 'recovery_required', 'request_id': request_id, 'message': 'Opt-out requires recovery.'}), 503
+    finally:
+        conn.close()
+    return jsonify({'success': True, 'status': 'applied', 'request_id': request_id}), 200
+
+@app.route('/api/admin/whatsapp/legacy-opt-outs/<int:quarantine_id>/resolve', methods=['POST'])
+@admin_required
+def resolve_whatsapp_legacy_opt_out(quarantine_id):
+    """Resolve legacy quarantine only by retaining a reviewed suppression."""
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    user = get_current_user()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or data.get('decision') != 'suppress':
+        return jsonify({'success': False, 'message': 'A suppression decision is required.'}), 400
+    resolution_id = data.get('resolution_id')
+    if not isinstance(resolution_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', resolution_id):
+        return jsonify({'success': False, 'message': 'Invalid resolution ID.'}), 400
+    reason = data.get('reason', 'legacy_opt_out_reviewed')
+    if not isinstance(reason, str) or not 1 <= len(reason) <= 200 or any(ord(ch) < 32 or ord(ch) == 127 for ch in reason):
+        return jsonify({'success': False, 'message': 'Invalid resolution reason.'}), 400
+    try:
+        recipient_e164 = database.normalize_recipient_number(data.get('recipient_e164'), region=data.get('region'))
+        approved_mapping = database.normalize_recipient_number(data.get('approved_mapping'), region=data.get('region')) if data.get('approved_mapping') else None
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'A valid international recipient number is required.'}), 400
+    result, status = _call_whatsapp_service(
+        'POST', f'/v1/users/{user["id"]}/coordination/legacy-opt-outs/{quarantine_id}/resolve', user['id'], {
+            'quarantineId': quarantine_id,
+            'resolutionId': resolution_id,
+            'reviewerPrincipalId': user['id'],
+            'decision': 'suppress',
+            'recipientE164': recipient_e164,
+            'approvedMapping': approved_mapping,
+            'reason': reason,
+        }, allow_when_disabled=True,
+    )
+    if status != 200 or not isinstance(result, dict) or result.get('success') is not True:
+        return jsonify({'success': False, 'status': 'recovery_required' if status >= 500 else 'rejected', 'message': 'Legacy opt-out resolution requires review.'}), (503 if status >= 500 else 409)
+    return jsonify({'success': True, 'status': result.get('status'), 'resolution_id': resolution_id}), 200
+
+# Stage 1 only: these routes manage a user's linked-device prototype session.
+# They intentionally do not send messages or change task, proof, approval, or
+# payout state. The browser-provided user ID is ignored; the Flask session is
+# the sole source of identity.
+@app.route('/api/whatsapp/connection/qr', methods=['POST'])
+@login_required
+def request_whatsapp_connection_qr():
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    user = get_current_user()
+    result, status = _call_whatsapp_service(
+        'POST', f'/v1/users/{user["id"]}/qr', user['id']
+    )
+    return jsonify(result), status
+
+@app.route('/api/whatsapp/connection/status', methods=['GET'])
+@login_required
+def whatsapp_connection_status():
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    user = get_current_user()
+    result, status = _call_whatsapp_service(
+        'GET', f'/v1/users/{user["id"]}/status', user['id']
+    )
+    return jsonify(result), status
+
+@app.route('/api/whatsapp/connection/disconnect', methods=['POST'])
+@login_required
+def disconnect_whatsapp_connection():
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    user = get_current_user()
+    result, status = _call_whatsapp_service(
+        'POST', f'/v1/users/{user["id"]}/disconnect', user['id']
+    )
+    return jsonify(result), status
+
 # ----------------- WEB PAGES -----------------
 @app.route('/')
 def index():
@@ -930,6 +3250,280 @@ def create_campaign_inquiry():
         conn.close()
     return jsonify({'success': True, 'message': 'Thanks! Your campaign request has been submitted. The TaskPe team will review your requirements and contact you shortly.', 'inquiry_id': inquiry_id}), 201
 
+def _business_recipient_input(data):
+    """Return raw recipient values from the business campaign form."""
+    raw = data.get('target_numbers') or data.get('recipient_numbers') or []
+    if isinstance(raw, str):
+        return [value.strip() for value in re.split(r'[,\n;]+', raw) if value.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(value).strip() for value in raw if str(value).strip()]
+    raise ValueError('Recipient numbers must be supplied as text or a list.')
+
+
+def _business_recipient_preview(values, region):
+    valid = []
+    invalid = []
+    duplicates = []
+    seen = set()
+    for value in values:
+        try:
+            normalized = database.normalize_recipient_number(value, region=region)
+        except ValueError:
+            invalid.append(value)
+            continue
+        if normalized in seen:
+            duplicates.append(value)
+            continue
+        seen.add(normalized)
+        valid.append(normalized)
+    return {
+        'valid_numbers': valid,
+        'invalid_numbers': invalid,
+        'duplicate_numbers': duplicates,
+        'valid_count': len(valid),
+        'invalid_count': len(invalid),
+        'duplicate_count': len(duplicates),
+    }
+
+
+@app.route('/api/business/campaigns/recipients/preview', methods=['POST'])
+@business_campaign_required
+def preview_business_campaign_recipients():
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    data = request.get_json(silent=True) or {}
+    try:
+        region = database.validate_phone_region(data.get('recipient_region') or data.get('phone_region'))
+        values = _business_recipient_input(data)
+        if not values:
+            raise ValueError('At least one recipient number is required.')
+        preview = _business_recipient_preview(values, region)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    return jsonify({'success': True, 'preview': preview, 'advisory': True})
+
+
+@app.route('/api/business/campaigns', methods=['GET'])
+@business_campaign_required
+def list_business_campaigns():
+    user = get_current_user()
+    conn = database.get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT id, campaign_id, title, task_type, status, created_at,
+                   target_numbers, recipient_region
+            FROM tasks WHERE owner_user_id = ? ORDER BY id DESC
+        ''', (user['id'],)).fetchall()
+        campaigns = []
+        for row in rows:
+            recipients = json.loads(row['target_numbers'])
+            declaration = database.get_whatsapp_campaign_consent_declaration(
+                conn, row['id'], row['campaign_id'] or row['id'])
+            campaigns.append({
+                'task_id': row['id'],
+                'campaign_id': row['campaign_id'] or row['id'],
+                'title': row['title'],
+                'task_type': row['task_type'],
+                'status': row['status'],
+                'review_status': row['campaign_review_status'],
+                'recipient_count': len(recipients) if isinstance(recipients, list) else 0,
+                'consent_status': 'recorded' if declaration else 'missing',
+                'created_at': row['created_at'],
+            })
+        return jsonify({'success': True, 'campaigns': campaigns})
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/business-campaigns', methods=['GET'])
+@admin_required
+def admin_list_business_campaigns():
+    conn = database.get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT t.id, t.campaign_id, t.title, t.description, t.task_type,
+                   t.target_numbers, t.recipient_region, t.status,
+                   t.campaign_review_status, t.campaign_approved_by,
+                   t.campaign_approved_at, t.created_at, t.owner_user_id,
+                   u.name AS owner_name, u.email AS owner_email
+            FROM tasks t LEFT JOIN users u ON u.id = t.owner_user_id
+            WHERE t.owner_user_id IS NOT NULL
+            ORDER BY CASE WHEN t.campaign_review_status = 'pending_review' THEN 0 ELSE 1 END,
+                     t.id DESC
+        ''').fetchall()
+        result = []
+        for row in rows:
+            recipients = json.loads(row['target_numbers'])
+            declaration = database.get_whatsapp_campaign_consent_declaration(
+                conn, row['id'], row['campaign_id'] or row['id'])
+            result.append({
+                'task_id': row['id'], 'campaign_id': row['campaign_id'] or row['id'],
+                'title': row['title'], 'description': row['description'],
+                'task_type': row['task_type'], 'recipient_region': row['recipient_region'],
+                'recipient_count': len(recipients), 'recipients': recipients,
+                'status': row['status'], 'review_status': row['campaign_review_status'],
+                'owner_user_id': row['owner_user_id'], 'owner_name': row['owner_name'],
+                'owner_email': row['owner_email'], 'created_at': row['created_at'],
+                'approved_by': row['campaign_approved_by'],
+                'approved_at': row['campaign_approved_at'],
+                'consent_declaration': declaration['declaration_text'] if declaration else None,
+                'consent_fingerprint': declaration['recipient_fingerprint'] if declaration else None,
+            })
+        return jsonify({'success': True, 'campaigns': result})
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/business-campaigns/<int:task_id>/approve', methods=['POST'])
+@admin_required
+def admin_approve_business_campaign(task_id):
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    admin = get_current_user()
+    conn = database.get_db_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task or task['owner_user_id'] is None:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Business campaign not found.'}), 404
+        recipients = task_recipient_pool(task)
+        declaration = database.get_whatsapp_campaign_consent_declaration(
+            conn, task_id, task['campaign_id'] or task_id)
+        fingerprint = _campaign_recipient_fingerprint(recipients)
+        if (not declaration or
+                (task['owner_user_id'] is not None and declaration['business_user_id'] != task['owner_user_id'])
+                or declaration['campaign_id'] != (task['campaign_id'] or task['id'])
+                or declaration['declaration_text'] != database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT
+                or declaration['recipient_count'] != len(recipients)
+                or declaration['recipient_fingerprint'] != fingerprint):
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Recipient list changed or consent declaration is invalid; a fresh declaration is required.'}), 409
+        if task['campaign_review_status'] == 'approved':
+            if task['campaign_approval_fingerprint'] != fingerprint:
+                conn.rollback()
+                return jsonify({'success': False, 'message': 'Approved campaign recipients changed; re-submit a fresh declaration.'}), 409
+            conn.rollback()
+            return jsonify({'success': True, 'idempotent': True, 'status': 'approved', 'task_id': task_id})
+        cursor = conn.execute('''
+            UPDATE tasks
+            SET status = 'active', campaign_review_status = 'approved', campaign_approved_by = ?,
+                campaign_approved_at = CURRENT_TIMESTAMP, campaign_approval_fingerprint = ?
+            WHERE id = ? AND owner_user_id IS NOT NULL AND campaign_review_status = 'pending_review'
+        ''', (admin['id'], fingerprint, task_id))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return jsonify({'success': False, 'message': 'Campaign approval state changed; refresh and retry.'}), 409
+        conn.commit()
+        return jsonify({'success': True, 'status': 'approved', 'task_id': task_id,
+                        'message': 'Business campaign approved and available to workers.'})
+    except (ValueError, json.JSONDecodeError):
+        conn.rollback()
+        return jsonify({'success': False, 'message': 'Campaign recipient snapshot is invalid.'}), 409
+    finally:
+        conn.close()
+
+
+@app.route('/api/business/campaigns', methods=['POST'])
+@business_campaign_required
+def create_business_campaign():
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    user = get_current_user()
+    is_multipart = request.mimetype == 'multipart/form-data'
+    data = request.form.to_dict() if not request.is_json else (request.get_json(silent=True) or {})
+    try:
+        title = str(data.get('title') or '').strip()
+        template_text = str(data.get('template_text') or data.get('message') or '').strip()
+        description = str(data.get('description') or template_text).strip()
+        task_type = str(data.get('task_type') or 'TEXT_LINK').strip().upper()
+        region = database.validate_phone_region(data.get('recipient_region') or data.get('phone_region'))
+        values = _business_recipient_input(data)
+        preview = _business_recipient_preview(values, region)
+        if not title or not template_text or not description:
+            raise ValueError('Campaign title, description, and message text are required.')
+        if task_type not in AUTOMATED_WHATSAPP_TASK_TYPES:
+            raise ValueError('Unsupported campaign content type.')
+        if preview['invalid_count']:
+            raise ValueError('Every recipient must be a valid international number or an unambiguous number for the selected region.')
+        if not preview['valid_numbers']:
+            raise ValueError('At least one valid recipient number is required.')
+        if str(data.get('consent_declaration_confirmed', data.get('counter_declaration_confirmed', ''))).strip().lower() not in {'1', 'true', 'yes', 'on'}:
+            raise ValueError('The business consent declaration is required.')
+        submitted_text = data.get('consent_declaration_text')
+        if submitted_text is not None and str(submitted_text).strip() != database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT:
+            raise ValueError('The approved business declaration text is required.')
+        destination_link = normalize_task_destination(data.get('destination_link'))
+        if not destination_link or not destination_link.lower().startswith('https://'):
+            raise ValueError('A valid HTTPS destination link is required.')
+        image_file = request.files.get('campaign_image') if is_multipart else None
+        image_path = None
+        if task_type == 'IMAGE_TEXT_LINK':
+            if not image_file or not image_file.filename or secure_filename(image_file.filename) != image_file.filename:
+                raise ValueError('A campaign image is required for image campaigns.')
+            extension = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else ''
+            if extension not in {'png', 'jpg', 'jpeg', 'webp'} or not valid_image_content(image_file):
+                raise ValueError('Upload a valid PNG, JPG, JPEG, or WEBP campaign image.')
+            image_path = f'campaign_{secrets.token_hex(16)}.{extension}'
+            image_file.save(os.path.join(app.config['TASK_ASSET_FOLDER'], image_path))
+        conn = database.get_db_connection()
+        try:
+            rate_paise = inr_to_paise(get_setting_decimal(conn, 'per_message_rate', '3'))
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO tasks
+                    (title, category, description, payout, payout_paise, template_text,
+                     target_numbers, recipient_region, campaign_id, owner_user_id,
+                     recipients_per_slot, time_limit_minutes, proof_instructions,
+                     total_slots, completed_slots, status, campaign_review_status, task_type, image_path,
+                     destination_link, reward_per_number_paise, reward_source)
+                 VALUES (?, 'Direct Message', ?, ?, ?, ?, ?, ?, NULL, ?, ?, 15, ?, 1, 0, 'pending_review', 'pending_review', ?, ?, ?, ?, 'business_at_creation')
+            ''', (title, description, float(paise_to_inr(rate_paise * len(preview['valid_numbers']))),
+                  rate_paise * len(preview['valid_numbers']), template_text,
+                  json.dumps(preview['valid_numbers']), region, user['id'],
+                  len(preview['valid_numbers']), 'Upload screenshot showing sent message.',
+                  task_type, image_path, destination_link, rate_paise))
+            task_id = cursor.lastrowid
+            cursor.execute('UPDATE tasks SET campaign_id = ? WHERE id = ?', (task_id, task_id))
+            database.create_whatsapp_campaign_consent_declaration(
+                conn, task_id=task_id, campaign_id=task_id,
+                business_user_id=user['id'], phone_numbers=preview['valid_numbers'],
+                declaration_text=database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT,
+                region=region,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            if image_path:
+                try:
+                    os.remove(os.path.join(app.config['TASK_ASSET_FOLDER'], image_path))
+                except OSError:
+                    pass
+            raise
+        finally:
+            conn.close()
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception:
+        app.logger.exception('Unable to create business campaign.')
+        return jsonify({'success': False, 'message': 'Campaign creation is unavailable.'}), 503
+    return jsonify({
+        'success': True,
+        'status': 'pending_review',
+        'review_status': 'pending_review',
+        'task_id': task_id,
+        'campaign_id': task_id,
+        'recipient_count': len(preview['valid_numbers']),
+        'duplicate_count': preview['duplicate_count'],
+        'consent_status': 'recorded',
+        'sending_enabled': False,
+        'message': 'Campaign created and queued for administrator approval. Automated sending remains disabled.',
+    }), 201
+
+
 @app.route('/api/admin/campaign-inquiries', methods=['GET'])
 @admin_required
 def admin_campaign_inquiries():
@@ -946,15 +3540,53 @@ def admin_campaign_inquiries():
         conn.close()
     return jsonify({'success': True, 'inquiries': [dict(row) for row in rows]})
 
-@app.route('/api/admin/campaign-inquiries/<int:inquiry_id>/status', methods=['PATCH'])
+CAMPAIGN_INQUIRY_STATUSES = ('new', 'contacted', 'negotiating', 'approved', 'active', 'completed', 'closed')
+CAMPAIGN_INQUIRY_STATUS_SET = set(CAMPAIGN_INQUIRY_STATUSES)
+CAMPAIGN_INQUIRY_NOTES_LIMIT = 4000
+
+@app.route('/api/admin/campaign-inquiries/<int:inquiry_id>', methods=['GET'])
 @admin_required
-def update_campaign_inquiry_status(inquiry_id):
-    status = str((request.get_json(silent=True) or {}).get('status') or '').strip().lower()
-    if status not in {'new', 'contacted', 'closed'}:
-        return jsonify({'success': False, 'message': 'Invalid campaign request status.'}), 400
+def admin_campaign_inquiry_detail(inquiry_id):
     conn = database.get_db_connection()
     try:
-        cursor = conn.execute('UPDATE campaign_inquiries SET status = ? WHERE id = ?', (status, inquiry_id))
+        row = conn.execute('''
+            SELECT id, company_name, contact_person, email, phone, task_type,
+                   target_location, participant_count, campaign_description,
+                   estimated_budget, created_at, status, admin_notes
+            FROM campaign_inquiries
+            WHERE id = ?
+        ''', (inquiry_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'success': False, 'message': 'Campaign request not found.'}), 404
+    return jsonify({'success': True, 'inquiry': dict(row)})
+
+@app.route('/api/admin/campaign-inquiries/<int:inquiry_id>/status', methods=['PATCH'])
+@app.route('/api/admin/campaign-inquiries/<int:inquiry_id>', methods=['PATCH'])
+@admin_required
+def update_campaign_inquiry_status(inquiry_id):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'Invalid campaign request update.'}), 400
+    raw_status = data.get('status')
+    status = str(raw_status or '').strip().lower()
+    if status not in CAMPAIGN_INQUIRY_STATUS_SET:
+        return jsonify({'success': False, 'message': 'Invalid campaign request status.'}), 400
+    raw_notes = data.get('admin_notes', '')
+    if raw_notes is None:
+        raw_notes = ''
+    if isinstance(raw_notes, (dict, list, tuple, set, bool)):
+        return jsonify({'success': False, 'message': 'Invalid admin notes.'}), 400
+    admin_notes = str(raw_notes).strip()
+    if len(admin_notes) > CAMPAIGN_INQUIRY_NOTES_LIMIT:
+        return jsonify({'success': False, 'message': f'Admin notes must be {CAMPAIGN_INQUIRY_NOTES_LIMIT} characters or fewer.'}), 400
+    conn = database.get_db_connection()
+    try:
+        cursor = conn.execute(
+            'UPDATE campaign_inquiries SET status = ?, admin_notes = ? WHERE id = ?',
+            (status, admin_notes or None, inquiry_id),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1496,7 +4128,7 @@ def forgot_password():
 @app.route('/api/auth/verify-otp', methods=['POST'])
 def verify_otp():
     data = request.get_json() or {}
-    raw_mobile = database.normalize_target_number(data.get('mobile') or '')
+    raw_mobile = database.normalize_legacy_target_number(data.get('mobile') or '')
     mobile = normalize_auth_mobile(raw_mobile)
     otp_code = (data.get('otp_code') or '').strip()
 
@@ -1651,6 +4283,346 @@ def reset_password():
     return jsonify({'success': True, 'message': 'Password reset successfully. Please log in.'})
 
 # ----------------- TASKS APIS -----------------
+AUTOMATED_WHATSAPP_TASK_TYPES = frozenset({'TEXT_LINK', 'IMAGE_TEXT_LINK'})
+AUTOMATED_WHATSAPP_QUANTITY_CHOICES = (20, 50, 80)
+WHATSAPP_CONSENT_GATE_AVAILABLE = os.environ.get(
+    'TASKPE_WHATSAPP_CONSENT_GATE_ENABLED', '0'
+).strip().lower() in {'1', 'true', 'yes'}
+
+def _worker_whatsapp_quota_status(worker_id):
+    """Read authoritative Node quota without creating or reserving anything."""
+    response, status = _call_whatsapp_service(
+        'GET', f'/v1/users/{worker_id}/quota', worker_id
+    )
+    if status != 200 or not isinstance(response, dict) or response.get('success') is not True:
+        return {'status': 'unavailable'}
+    required = ('worker_id', 'quota_day', 'limit', 'reserved', 'remaining', 'timezone')
+    if any(field not in response for field in required):
+        return {'status': 'unavailable'}
+    if response['worker_id'] != worker_id or response['timezone'] != 'Asia/Kolkata':
+        return {'status': 'unavailable'}
+    if any(isinstance(response[field], bool) or not isinstance(response[field], int)
+           for field in ('limit', 'reserved', 'remaining')):
+        return {'status': 'unavailable'}
+    if response['limit'] < 0 or response['reserved'] < 0 or response['remaining'] < 0:
+        return {'status': 'unavailable'}
+    return {
+        'status': 'available',
+        'quota_day': response['quota_day'],
+        'limit': response['limit'],
+        'reserved': response['reserved'],
+        'remaining': response['remaining'],
+        'timezone': response['timezone'],
+    }
+
+@app.route('/api/whatsapp/campaigns/eligible', methods=['GET'])
+@login_required
+def get_eligible_whatsapp_campaigns():
+    """Return advisory campaign availability; never creates plans or claims."""
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    user = get_current_user()
+    quota = _worker_whatsapp_quota_status(user['id'])
+    conn = database.get_db_connection()
+    try:
+        tasks = conn.execute('''
+            SELECT * FROM tasks
+            WHERE status = 'active' AND task_type IN (?, ?)
+            ORDER BY id DESC
+        ''', tuple(AUTOMATED_WHATSAPP_TASK_TYPES)).fetchall()
+        campaigns = []
+        for task in tasks:
+            if not business_campaign_is_approved(conn, task):
+                continue
+            eligibility = build_recipient_eligibility(conn, task)
+            eligible_count = eligibility['eligible_recipient_count']
+            quota_remaining = quota.get('remaining') if quota['status'] == 'available' else None
+            maximum = min(MAX_CAMPAIGN_PLAN_RECIPIENTS, eligible_count, quota_remaining) if quota_remaining is not None else None
+            choices = [choice for choice in AUTOMATED_WHATSAPP_QUANTITY_CHOICES if maximum is not None and choice <= maximum]
+            if maximum is not None and maximum > 0 and maximum not in choices:
+                choices.append(maximum)
+            campaigns.append({
+                'task_id': task['id'],
+                'campaign_id': task['campaign_id'] or task['id'],
+                'title': task['title'],
+                'task_type': task['task_type'],
+                'source_recipient_count': eligibility['source_recipient_count'],
+                'eligible_recipient_count': eligible_count,
+                'exclusion_counts': eligibility['exclusion_counts'],
+                'max_selectable_quantity': maximum,
+                'quantity_choices': sorted(set(choices)),
+                'availability': 'available' if maximum and maximum > 0 else ('quota_unavailable' if quota['status'] != 'available' else 'no_eligible_recipients'),
+            })
+        return jsonify({
+            'success': True,
+            'advisory': True,
+            'consent_opt_out_enforced': True,
+            'quota': quota,
+            'campaigns': campaigns,
+        })
+    except Exception:
+        app.logger.exception('Unable to read WhatsApp campaign availability.')
+        return jsonify({'success': False, 'message': 'Campaign availability is unavailable.'}), 503
+    finally:
+        conn.close()
+
+@app.route('/api/whatsapp/campaigns/prepare', methods=['POST'])
+@login_required
+def prepare_whatsapp_campaign():
+    """Create or reserve a worker-owned campaign plan without sending."""
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'message': 'Authentication required. Please log in.'}), 401
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'A valid campaign request is required.'}), 400
+
+    campaign_id = data.get('campaign_id')
+    quantity = data.get('quantity')
+    plan_key = data.get('idempotency_key')
+    if (isinstance(campaign_id, bool) or not isinstance(campaign_id, int) or campaign_id < 1 or
+            (quantity != 'all' and (isinstance(quantity, bool) or not isinstance(quantity, int))) or
+            not isinstance(plan_key, str) or
+            not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', plan_key)):
+        return jsonify({'success': False, 'message': 'Invalid campaign preparation request.'}), 400
+
+    conn = database.get_db_connection()
+    try:
+        existing_plan = conn.execute('''
+            SELECT * FROM whatsapp_campaign_plans
+            WHERE plan_key = ? AND sender_worker_id = ?
+        ''', (plan_key, user['id'])).fetchone()
+        key_in_use = conn.execute('''
+            SELECT 1 FROM whatsapp_campaign_plans WHERE plan_key = ? LIMIT 1
+        ''', (plan_key,)).fetchone()
+        if key_in_use and not existing_plan:
+            return jsonify({'success': False, 'message': 'Campaign preparation conflicted with another request.'}), 409
+        if existing_plan:
+            task = conn.execute(
+                'SELECT * FROM tasks WHERE id = ?', (existing_plan['task_id'],)
+            ).fetchone()
+            persisted_campaign_id = task['campaign_id'] or task['id'] if task else None
+            requested_quantity = 'all' if quantity == 'all' else str(quantity)
+            if (not task or campaign_id != persisted_campaign_id or
+                    existing_plan['requested_quantity'] != requested_quantity or
+                    task['task_type'] not in AUTOMATED_WHATSAPP_TASK_TYPES):
+                return jsonify({'success': False, 'message': 'Campaign preparation identity conflict.'}), 409
+            if not business_campaign_is_approved(conn, task):
+                return jsonify({'success': False, 'message': 'Campaign requires fresh administrator approval and consent before preparation.'}), 403
+            if existing_plan['recipient_fingerprint'] != _campaign_recipient_fingerprint(task_recipient_pool(task)):
+                return jsonify({'success': False, 'message': 'Campaign recipients changed; a fresh preparation is required.'}), 409
+        else:
+            task = conn.execute('''
+                SELECT * FROM tasks
+                WHERE status = 'active'
+                  AND task_type IN (?, ?)
+                  AND (campaign_id = ? OR (campaign_id IS NULL AND id = ?))
+                ORDER BY id DESC LIMIT 1
+            ''', (*AUTOMATED_WHATSAPP_TASK_TYPES, campaign_id, campaign_id)).fetchone()
+            if not task:
+                return jsonify({'success': False, 'message': 'Campaign is not available for automated WhatsApp preparation.'}), 404
+            if not business_campaign_is_approved(conn, task):
+                return jsonify({'success': False, 'message': 'Campaign requires administrator approval before preparation.'}), 403
+
+        content_type = 'image' if task['task_type'] == 'IMAGE_TEXT_LINK' else 'text'
+        content_reference = f'task:{task["id"]}:{task["task_type"].lower()}:v1'
+        if existing_plan and (
+                existing_plan['batch_content_type'] != content_type or
+                existing_plan['content_reference'] != content_reference):
+            return jsonify({'success': False, 'message': 'Campaign preparation identity conflict.'}), 409
+        if not existing_plan:
+            eligibility = build_recipient_eligibility(conn, task)
+            try:
+                selected = select_eligible_recipients(eligibility, quantity)
+            except ValueError as exc:
+                return jsonify({'success': False, 'message': str(exc)}), 400
+            if not selected:
+                return jsonify({'success': False, 'message': 'No eligible recipients are currently available.'}), 409
+
+            quota = _worker_whatsapp_quota_status(user['id'])
+            if quota['status'] != 'available':
+                return jsonify({
+                    'success': False,
+                    'status': 'quota_unavailable',
+                    'message': 'Daily WhatsApp quota is currently unavailable. Please try again later.',
+                }), 503
+            if len(selected) > quota['remaining']:
+                return jsonify({
+                    'success': False,
+                    'status': 'quota_exceeded',
+                    'message': 'The requested quantity exceeds the remaining daily quota.',
+                }), 409
+
+        try:
+            plan = create_campaign_send_plan(
+                conn, task, user['id'], plan_key, quantity,
+                content_reference=content_reference, content_type=content_type,
+            )
+        except ValueError as exc:
+            return jsonify({'success': False, 'message': 'Campaign preparation conflicted with another request.'}), 409
+
+        result = reserve_campaign_send_plan_with_node(
+            conn, plan['plan_id'], content_type=content_type,
+        )
+        if result.get('status') == 'reserved':
+            return jsonify({
+                'success': True,
+                'status': 'reserved',
+                'idempotent': bool(plan.get('idempotent')),
+                'recipient_count': plan['recipient_count'],
+            })
+        if result.get('status') == 'failed' and result.get('failure_code') == 'QUOTA_EXCEEDED':
+            return jsonify({
+                'success': False,
+                'status': 'quota_exceeded',
+                'message': 'The daily WhatsApp quota was exhausted before reservation completed.',
+            }), 409
+        return jsonify({
+            'success': False,
+            'status': 'recovery_required',
+            'recovery_required': True,
+            'message': 'Reservation status is uncertain. No message was sent; please retry recovery later.',
+        }), 202
+    except PermissionError:
+        return jsonify({'success': False, 'message': 'Campaign ownership validation failed.'}), 403
+    except sqlite3.IntegrityError:
+        return jsonify({'success': False, 'message': 'Campaign preparation conflicted with another request.'}), 409
+    except Exception:
+        app.logger.exception('Unable to prepare WhatsApp campaign plan.')
+        return jsonify({'success': False, 'message': 'Campaign preparation is unavailable.'}), 503
+    finally:
+        conn.close()
+
+
+@app.route('/api/whatsapp/campaigns/send', methods=['POST'])
+@login_required
+def send_whatsapp_campaign():
+    """Fail closed until consent/opt-out enforcement exists.
+
+    The internal dispatcher is separately testable, but this browser route must
+    not create a live sending path while recipient consent is unresolved.
+    """
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    if not WHATSAPP_CONSENT_GATE_AVAILABLE:
+        return jsonify({
+            'success': False,
+            'status': 'consent_required',
+            'message': 'WhatsApp sending is unavailable until consent and opt-out enforcement is implemented.',
+        }), 412
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'plan_id'}:
+        return jsonify({'success': False, 'message': 'A valid reserved campaign plan is required.'}), 400
+    plan_id = data.get('plan_id')
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        return jsonify({'success': False, 'message': 'A valid reserved campaign plan is required.'}), 400
+    user = get_current_user()
+    conn = database.get_db_connection()
+    try:
+        result = send_reserved_whatsapp_campaign_batch(conn, plan_id, user['id'])
+        if result.get('status') == 'consent_required':
+            return jsonify({'success': False, **result}), 412
+        if result.get('status') == 'recovery_required':
+            return jsonify({
+                'success': False, 'status': 'recovery_required',
+                'recovery_required': True, 'delivered': False,
+            }), 202
+        return jsonify({'success': True, **result}), 200
+    except PermissionError:
+        return jsonify({'success': False, 'message': 'Campaign ownership validation failed.'}), 403
+    except ValueError:
+        return jsonify({'success': False, 'message': 'Campaign reservation is not sendable.'}), 409
+    except Exception:
+        app.logger.exception('Unable to send reserved WhatsApp campaign.')
+        return jsonify({'success': False, 'message': 'Campaign sending is unavailable.'}), 503
+    finally:
+        conn.close()
+
+
+@app.route('/api/tasks/<int:task_id>/assignments/<int:assignment_id>/whatsapp-send', methods=['POST'])
+@app.route('/api/tasks/<int:task_id>/assignments/<int:assignment_id>/whatsapp/send', methods=['POST'])
+@app.route('/api/tasks/<int:task_id>/whatsapp-send', methods=['POST'])
+@app.route('/api/whatsapp/assignments/<int:assignment_id>/send', methods=['POST'])
+@login_required
+def send_assignment_whatsapp(task_id=None, assignment_id=None):
+    csrf_error = _require_whatsapp_csrf()
+    if csrf_error:
+        return csrf_error
+    if not whatsapp_feature_enabled():
+        return _whatsapp_feature_disabled_response()
+    if not WHATSAPP_CONSENT_GATE_AVAILABLE:
+        return jsonify({
+            'success': False,
+            'status': 'consent_required',
+            'message': 'WhatsApp sending is unavailable until consent and opt-out enforcement is implemented.',
+        }), 412
+
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'message': 'Authentication required. Please log in.'}), 401
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': 'A valid request body is required.'}), 400
+
+    if assignment_id is None:
+        assignment_id = data.get('assignment_id')
+    if isinstance(assignment_id, bool) or not isinstance(assignment_id, int) or assignment_id < 1:
+        return jsonify({'success': False, 'message': 'A valid assignment_id is required.'}), 400
+
+    if task_id is None:
+        task_id = data.get('task_id')
+    if task_id is not None and (isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 1):
+        return jsonify({'success': False, 'message': 'A valid task_id is required.'}), 400
+
+    plan_key = data.get('idempotency_key') or f"assignment-send-{assignment_id}"
+    selected_recipients = data.get('recipients')
+
+    conn = database.get_db_connection()
+    try:
+        release_expired_assignments(conn)
+        conn.commit()
+
+        result = send_assignment_whatsapp_batch(
+            conn, assignment_id, user['id'], task_id=task_id,
+            plan_key=plan_key, selected_recipients=selected_recipients,
+        )
+
+        status_name = result.get('status')
+        if status_name == 'consent_required':
+            return jsonify(result), 412
+        if status_name == 'recovery_required':
+            return jsonify(result), 202
+        if status_name in {'quota_exceeded', 'reservation_failed'}:
+            return jsonify(result), 409
+        if status_name in {'quota_unavailable'}:
+            return jsonify(result), 503
+        if result.get('success'):
+            return jsonify(result), 200
+        return jsonify(result), 400
+    except PermissionError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 403
+    except ValueError as exc:
+        err_msg = str(exc)
+        if 'not found' in err_msg.lower():
+            return jsonify({'success': False, 'message': err_msg}), 404
+        return jsonify({'success': False, 'message': err_msg}), 400
+    except Exception:
+        app.logger.exception('Unable to send assignment WhatsApp messages.')
+        return jsonify({'success': False, 'message': 'Assignment WhatsApp sending is unavailable.'}), 503
+    finally:
+        conn.close()
+
+
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
     user_id = session.get('user_id')
@@ -1659,7 +4631,12 @@ def get_tasks():
     conn.commit()
     # Workers may only discover and take currently published tasks. Archived
     # and paused tasks remain available to administrators for history review.
-    tasks = conn.execute("SELECT * FROM tasks WHERE status = 'active' ORDER BY id DESC").fetchall()
+    tasks = conn.execute("""
+        SELECT * FROM tasks
+        WHERE status = 'active'
+          AND (owner_user_id IS NULL OR campaign_review_status = 'approved')
+        ORDER BY id DESC
+    """).fetchall()
     slot_rows = conn.execute('''
         SELECT task_id, COUNT(*) AS occupied
         FROM task_assignments
@@ -1746,8 +4723,10 @@ def take_task(task_id):
         task = conn.execute("SELECT * FROM tasks WHERE id = ? AND status = 'active'", (task_id,)).fetchone()
         if not task:
             return jsonify({'success': False, 'message': 'This campaign is not available.'}), 404
+        if not business_campaign_is_approved(conn, task):
+            return jsonify({'success': False, 'message': 'This campaign is not available.'}), 404
         campaign_id = task['campaign_id'] or task['id']
-        required = task['recipients_per_slot'] or len(task_recipient_pool(task))
+        required = task['recipients_per_slot'] or len(task_recipient_pool(task, allow_legacy=True))
         occupied_slots = conn.execute('''
             SELECT COUNT(*) AS count FROM task_assignments
             WHERE task_id = ? AND status IN ('in_progress', 'pending_review', 'paid')
@@ -1762,7 +4741,7 @@ def take_task(task_id):
             return jsonify({'success': False, 'message': f'You already have an active {task["category"]} task. Submit or finish it before taking another.'}), 409
 
         available = []
-        for number in task_recipient_pool(task):
+        for number in task_recipient_pool(task, allow_legacy=True):
             already_used = conn.execute('''
                 SELECT 1 FROM recipient_allocations
                 WHERE campaign_id = ? AND phone_number = ?
@@ -1809,16 +4788,13 @@ def record_recipient_audit_event(task_id):
         return jsonify({'success': False, 'message': 'A valid assignment is required.'}), 400
 
     recipient_number = str(data.get('recipient_number') or '').strip()
-    normalized_recipient = normalize_phone_number(recipient_number)
-    if not normalized_recipient:
-        return jsonify({'success': False, 'message': 'A valid recipient number is required.'}), 400
 
     user = get_current_user()
     conn = database.get_db_connection()
     try:
         assignment = conn.execute('''
             SELECT ta.id, ta.task_id, ta.campaign_id, ta.user_id, ta.assigned_numbers,
-                   t.template_text, t.destination_link
+                   t.template_text, t.destination_link, t.recipient_region
             FROM task_assignments ta
             JOIN tasks t ON t.id = ta.task_id
             WHERE ta.id = ? AND ta.task_id = ? AND ta.user_id = ?
@@ -1829,8 +4805,18 @@ def record_recipient_audit_event(task_id):
         if not assignment:
             return jsonify({'success': False, 'message': 'Active assignment not found.'}), 404
 
+        normalized_recipient = normalize_phone_number(
+            recipient_number, region=assignment['recipient_region']
+        )
+        if not normalized_recipient:
+            normalized_recipient = ''
+        if not normalized_recipient:
+            return jsonify({'success': False, 'message': 'A valid recipient number is required.'}), 400
+
         assigned_numbers = {
-            normalize_phone_number(number) for number in get_assigned_numbers(assignment)
+            normalize_phone_number(number, region=assignment['recipient_region']) or
+            ''
+            for number in get_assigned_numbers(assignment)
         }
         if normalized_recipient not in assigned_numbers:
             return jsonify({'success': False, 'message': 'Recipient is not assigned to this worker slot.'}), 403
@@ -1900,6 +4886,11 @@ def get_task_detail(task_id):
     if not task:
         conn.close()
         return jsonify({'success': False, 'message': 'Task not found.'}), 404
+    if task['owner_user_id'] is not None and not business_campaign_is_approved(conn, task):
+        current_user = get_current_user()
+        if not current_user or current_user['role'] != 'admin':
+            conn.close()
+            return jsonify({'success': False, 'message': 'Task not found.'}), 404
 
     user_id = session.get('user_id')
     submission = None
@@ -2105,11 +5096,14 @@ def submit_task_proof(task_id):
     # This is verification metadata only: proof auditing never marks a target
     # paid and does not create any wallet/ledger mutation.
     target_reward = calculate_task_payout(conn, task, 1)
-    matched_targets = {normalize_phone_number(number) for number in audit_res.get('matched_numbers', [])}
-    invalid_targets = {normalize_phone_number(number) for number in audit_res.get('invalid_numbers', [])}
+    task_region = task['recipient_region'] if 'recipient_region' in task.keys() else None
+    def normalize_manual_target(value):
+        return normalize_phone_number(value, region=task_region)
+    matched_targets = {normalize_manual_target(number) for number in audit_res.get('matched_numbers', [])}
+    invalid_targets = {normalize_manual_target(number) for number in audit_res.get('invalid_numbers', [])}
     target_rows = []
     for target in target_nums:
-        normalized = normalize_phone_number(target)
+        normalized = normalize_manual_target(target)
         status = 'verified' if normalized in matched_targets else ('rejected' if normalized in invalid_targets else 'assigned')
         target_rows.append((assignment['id'], task_id, task['campaign_id'] or task_id, user['id'], str(target), normalized, status, str(paise_to_inr(per_number_rate_paise)), per_number_rate_paise))
     cursor.executemany('''
@@ -2561,6 +5555,122 @@ def admin_audit_report():
     response.headers['Content-Disposition'] = 'attachment; filename=taskpe-message-audit.csv'
     return response
 
+@app.route('/api/admin/audit-report.xlsx', methods=['GET'])
+@admin_required
+def admin_audit_report_xlsx():
+    """Export approved submissions and their recipient audit records as XLSX."""
+    conn = database.get_db_connection()
+    try:
+        campaign_rows = conn.execute('''
+            SELECT s.id AS submission_id, s.task_id, s.assignment_id, s.user_id,
+                   COALESCE(t.title, 'Task #' || s.task_id) AS task_title,
+                   u.name AS worker_name, u.mobile AS worker_mobile, u.email AS worker_email,
+                   COALESCE(s.required_count, s.numbers_required, 0) AS required_numbers,
+                   COALESCE(s.verified_count, s.numbers_detected, 0) AS verified_numbers,
+                   COALESCE(s.approved_valid_count, s.verified_count, s.numbers_detected, 0) AS approved_valid_numbers,
+                   COALESCE(s.invalid_count, 0) AS invalid_numbers,
+                   s.audit_score, s.audit_badge, s.payout_amount, s.payout_paise,
+                   s.submitted_at, s.reviewed_at AS approved_at,
+                   ta.status AS assignment_status
+            FROM submissions s
+            JOIN users u ON u.id = s.user_id
+            LEFT JOIN tasks t ON t.id = s.task_id
+            LEFT JOIN task_assignments ta ON ta.id = s.assignment_id
+            WHERE s.status = 'approved'
+            ORDER BY s.id
+        ''').fetchall()
+        recipient_rows = conn.execute('''
+            SELECT mar.id AS audit_id, mar.task_id,
+                   COALESCE(t.title, 'Task #' || mar.task_id) AS task_title,
+                   mar.submission_id, mar.assignment_id, mar.user_id,
+                   mar.sender_number, mar.recipient_number, mar.message_text,
+                   mar.open_count, mar.first_opened_at, mar.last_opened_at,
+                   tnr.status AS target_status, tnr.verified_at,
+                   tnr.paid_at AS target_paid_at,
+                   tp.amount AS paid_amount, tp.paid_at AS payment_timestamp
+            FROM message_audit_records mar
+            JOIN submissions s ON s.id = mar.submission_id AND s.status = 'approved'
+            LEFT JOIN tasks t ON t.id = mar.task_id
+            LEFT JOIN target_number_records tnr ON tnr.id = mar.target_number_record_id
+            LEFT JOIN target_payments tp ON tp.target_number_record_id = mar.target_number_record_id
+            ORDER BY mar.id
+        ''').fetchall()
+    finally:
+        conn.close()
+
+    workbook = Workbook()
+    campaigns = workbook.active
+    campaigns.title = 'Approved Campaigns'
+    campaign_headers = [
+        'Campaign / Task Title', 'Task ID', 'Submission ID', 'Assignment ID',
+        'Worker ID', 'Worker Name', 'Worker Mobile', 'Worker Email',
+        'Required Numbers', 'Verified Numbers', 'Approved Valid Numbers',
+        'Invalid Numbers', 'Audit Score', 'Audit Badge', 'Payout',
+        'Submitted At', 'Approved At', 'Assignment Status',
+    ]
+    campaigns.append(campaign_headers)
+    def excel_currency(amount, amount_paise):
+        if amount is not None:
+            try:
+                return float(amount)
+            except (TypeError, ValueError):
+                pass
+        return (amount_paise or 0) / 100
+
+    for row in campaign_rows:
+        campaigns.append([
+            row['task_title'], row['task_id'], row['submission_id'], row['assignment_id'],
+            row['user_id'], row['worker_name'], row['worker_mobile'], row['worker_email'],
+            row['required_numbers'], row['verified_numbers'], row['approved_valid_numbers'],
+            row['invalid_numbers'], row['audit_score'], row['audit_badge'],
+            excel_currency(row['payout_amount'], row['payout_paise']),
+            row['submitted_at'], row['approved_at'], row['assignment_status'],
+        ])
+
+    recipient = workbook.create_sheet('Recipient Audit')
+    recipient_headers = [
+        'Audit ID', 'Task ID', 'Campaign / Task Title', 'Submission ID',
+        'Assignment ID', 'Worker ID', 'Sender Number', 'Recipient Number',
+        'Message Text', 'Open Count', 'First Opened At', 'Last Opened At',
+        'Target Status', 'Verified At', 'Target Paid At', 'Paid Amount',
+        'Payment Timestamp',
+    ]
+    recipient.append(recipient_headers)
+    for row in recipient_rows:
+        recipient.append([
+            row['audit_id'], row['task_id'], row['task_title'], row['submission_id'],
+            row['assignment_id'], row['user_id'], row['sender_number'], row['recipient_number'],
+            row['message_text'], row['open_count'], row['first_opened_at'], row['last_opened_at'],
+            row['target_status'], row['verified_at'], row['target_paid_at'], row['paid_amount'],
+            row['payment_timestamp'],
+        ])
+
+    for sheet in workbook.worksheets:
+        sheet.freeze_panes = 'A2'
+        sheet.auto_filter.ref = sheet.dimensions
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill('solid', fgColor='1F4E78')
+        for column_cells in sheet.columns:
+            width = min(max(max(len(str(cell.value or '')) for cell in column_cells) + 2, 12), 42)
+            sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
+
+    for row in campaigns.iter_rows(min_row=2, min_col=15, max_col=15):
+        row[0].number_format = '₹#,##0.00'
+    for row in recipient.iter_rows(min_row=2, min_col=16, max_col=16):
+        row[0].number_format = '₹#,##0.00'
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    filename = f"TaskPe_Audit_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
 @app.route('/api/admin/settings', methods=['GET'])
 @admin_required
 def get_admin_settings():
@@ -2720,7 +5830,7 @@ def admin_rescan_submission(sub_id):
     proof_files = [row['file_name'] for row in proof_rows] or [sub['proof_image']]
     file_paths = [os.path.join(app.config['UPLOAD_FOLDER'], filename) for filename in proof_files]
     assignment = conn.execute("SELECT * FROM task_assignments WHERE id = ?", (sub['assignment_id'],)).fetchone() if sub['assignment_id'] else None
-    target_nums = get_assigned_numbers(assignment) if assignment else task_recipient_pool(task)
+    target_nums = get_assigned_numbers(assignment) if assignment else task_recipient_pool(task, allow_legacy=True)
     audit_res = ocr_scanner.audit_screenshot_proof(file_paths, target_nums, task['template_text'])
     # A re-scan is allowed to revoke an earlier automatic decision.  This does
     # not touch manually approved work; it only quarantines submissions that
@@ -3253,19 +6363,42 @@ def admin_create_task():
     if time_limit < 1 or total_slots < 1 or recipients_per_slot < 1:
         return jsonify({'success': False, 'message': 'Slot and time values must be positive.'}), 400
 
+    try:
+        recipient_region = database.validate_phone_region(
+            data.get('recipient_region') or data.get('phone_region')
+        )
+    except ValueError:
+        return jsonify({'success': False, 'message': 'A valid recipient region is required.'}), 400
+
     if isinstance(numbers_raw, str):
         # Split by comma, space, or newline
-        nums = [n.strip().replace(' ', '').replace('+', '') for n in numbers_raw.replace('\n', ',').split(',') if n.strip()]
+        nums = [n.strip() for n in numbers_raw.replace('\n', ',').split(',') if n.strip()]
     else:
-        nums = [str(n).strip().replace(' ', '').replace('+', '') for n in numbers_raw if str(n).strip()]
-
-    nums = list(dict.fromkeys(normalize_phone_number(number) for number in nums if normalize_phone_number(number)))
+        nums = [str(n).strip() for n in numbers_raw if str(n).strip()]
+    try:
+        normalized_nums = [database.normalize_recipient_number(number, region=recipient_region) for number in nums]
+    except ValueError:
+        return jsonify({'success': False, 'message': 'Every recipient must be a valid international number or an unambiguous number for the selected region.'}), 400
+    nums = list(dict.fromkeys(normalized_nums))
     required_pool_size = total_slots * recipients_per_slot
     if len(nums) < required_pool_size:
         return jsonify({
             'success': False,
             'message': f'Need {required_pool_size} unique target numbers for {total_slots} slots × {recipients_per_slot} recipients. Received {len(nums)}.'
         }), 400
+
+    counter_declaration_confirmed = str(
+        data.get('counter_declaration_confirmed', data.get('counter_declaration', data.get('consent_declaration', '0')))
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    if not counter_declaration_confirmed:
+        return jsonify({'success': False, 'message': 'A business consent declaration is required.'}), 400
+    user = get_current_user()
+    if not user or isinstance(user['id'], bool) or not isinstance(user['id'], int) or user['id'] < 1:
+        return jsonify({'success': False, 'message': 'Authenticated business user is required.'}), 403
+    submitted_declaration_text = data.get('consent_declaration_text')
+    if submitted_declaration_text is not None and str(submitted_declaration_text).strip() != database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT:
+        return jsonify({'success': False, 'message': 'The approved business declaration text is required.'}), 400
+    declaration_text = database.SHOP_CONSENT_DECLARATION_DEFAULT_TEXT
 
     use_default = str(data.get('use_default_reward', '1')).strip().lower() not in {'0', 'false', 'no', 'off'}
     conn = database.get_db_connection()
@@ -3299,16 +6432,24 @@ def admin_create_task():
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO tasks (title, category, description, payout, payout_paise, template_text,
-                target_numbers, recipients_per_slot, time_limit_minutes, proof_instructions,
+                target_numbers, recipient_region, recipients_per_slot, time_limit_minutes, proof_instructions,
                 total_slots, completed_slots, status, task_type, image_path, destination_link,
                 reward_per_number_paise, reward_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
         ''', (title, category, description, float(paise_to_inr(payout_paise)), payout_paise,
-              template_text, json.dumps(nums), recipients_per_slot, time_limit,
+              template_text, json.dumps(nums), recipient_region, recipients_per_slot, time_limit,
               proof_instructions, total_slots, task_type, image_path, destination_link,
               reward_paise, reward_source))
         task_id = cursor.lastrowid
         cursor.execute("UPDATE tasks SET campaign_id = ? WHERE id = ?", (task_id, task_id))
+
+        database.create_whatsapp_campaign_consent_declaration(
+            conn, task_id=task_id, campaign_id=task_id,
+            business_user_id=user['id'], phone_numbers=nums,
+            declaration_text=declaration_text,
+            region=recipient_region,
+        )
+
         conn.commit()
     except Exception:
         conn.rollback()

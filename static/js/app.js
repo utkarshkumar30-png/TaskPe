@@ -72,6 +72,8 @@ function navigate(viewName, params = {}) {
   if (viewName === 'tasks') {
     if (Object.prototype.hasOwnProperty.call(params, 'category')) activeTaskCategory = params.category || 'all';
     loadTasks();
+    loadWhatsAppCampaignAvailability();
+    loadWhatsAppConnectionStatus();
   }
   if (viewName === 'wallet') loadWalletData();
   if (viewName === 'admin') loadAdminData();
@@ -491,6 +493,7 @@ function openCampaignRequestModal() {
   success.classList.add('hidden');
   modal.classList.remove('hidden');
   document.body.classList.add('modal-open');
+  loadBusinessCampaigns();
 }
 
 function closeCampaignRequestModal() {
@@ -499,27 +502,85 @@ function closeCampaignRequestModal() {
   document.body.classList.remove('modal-open');
 }
 
-async function submitCampaignRequest(event) {
+function toggleBusinessCampaignImage(taskType) {
+  const label = document.getElementById('business-campaign-image-label');
+  const input = label?.querySelector('input[type="file"]');
+  const image = taskType === 'IMAGE_TEXT_LINK';
+  if (label) label.classList.toggle('hidden', !image);
+  if (input) input.required = image;
+}
+
+async function previewBusinessCampaignRecipients() {
+  const form = document.getElementById('form-campaign-request');
+  const status = document.getElementById('business-campaign-status');
+  if (!form || !status) return;
+  const formData = new FormData(form);
+  const csrf = window.__TASKPE_CSRF__ || await refreshCsrfToken();
+  const recipients = formData.get('target_numbers') || '';
+  const region = formData.get('recipient_region') || '';
+  try {
+    const response = await fetch('/api/business/campaigns/recipients/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify({target_numbers: recipients, recipient_region: region}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to validate recipients.');
+    const preview = data.preview;
+    status.textContent = `Valid: ${preview.valid_count}; invalid: ${preview.invalid_count}; duplicates: ${preview.duplicate_count}.`;
+  } catch (error) {
+    status.textContent = error.message || 'Unable to validate recipients.';
+  }
+}
+
+async function submitBusinessCampaign(event) {
   event.preventDefault();
   const form = event.currentTarget;
   if (campaignRequestInFlight || !form.reportValidity()) return;
   const submitButton = form.querySelector('button[type="submit"]');
   campaignRequestInFlight = true;
   if (submitButton) { submitButton.disabled = true; submitButton.textContent = 'Submitting…'; }
-  const payload = Object.fromEntries(new FormData(form).entries());
+  const payload = new FormData(form);
   try {
-    const response = await fetch('/api/campaign-inquiries', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    const csrf = window.__TASKPE_CSRF__ || await refreshCsrfToken();
+    const response = await fetch('/api/business/campaigns', {
+      method: 'POST', headers: {'X-CSRF-Token': csrf}, body: payload,
     });
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.message || 'Unable to submit campaign request.');
     form.classList.add('hidden');
     document.getElementById('campaign-request-success').classList.remove('hidden');
+    const successMessage = document.querySelector('#campaign-request-success p');
+    if (successMessage) successMessage.textContent = `${data.message} Campaign #${data.campaign_id} is now visible in your campaign list.`;
+    await loadBusinessCampaigns();
   } catch (error) {
     showToast(error.message || 'Unable to submit campaign request.', 'error');
   } finally {
     campaignRequestInFlight = false;
     if (submitButton) { submitButton.disabled = false; submitButton.textContent = 'Submit Campaign Request'; }
+  }
+}
+
+async function loadBusinessCampaigns() {
+  const list = document.getElementById('business-campaign-list');
+  if (!list) return;
+  list.textContent = 'Loading campaign status…';
+  try {
+    const response = await fetch('/api/business/campaigns', {cache: 'no-store'});
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Campaign status is unavailable.');
+    if (!data.campaigns.length) {
+      list.textContent = 'No campaigns have been created by this account.';
+      return;
+    }
+    list.innerHTML = data.campaigns.map(campaign => (
+      `<div class="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">` +
+      `<div class="font-semibold text-white">${escapeHtml(campaign.title)}</div>` +
+      `<div class="mt-1">Status: ${escapeHtml(campaign.status)} · Recipients: ${campaign.recipient_count} · Consent: ${escapeHtml(campaign.consent_status)}</div>` +
+      `</div>`
+    )).join('');
+  } catch (error) {
+    list.textContent = error.message || 'Campaign status is unavailable.';
   }
 }
 
@@ -544,6 +605,204 @@ async function loadTasks() {
     }
   } catch (err) {
     showToast('Failed to load tasks', 'error');
+  }
+}
+
+async function loadWhatsAppCampaignAvailability() {
+  const panel = document.getElementById('whatsapp-campaign-discovery');
+  const state = document.getElementById('whatsapp-campaign-discovery-state');
+  const quota = document.getElementById('whatsapp-campaign-quota');
+  const list = document.getElementById('whatsapp-campaign-list');
+  if (!panel || !state || !quota || !list) return;
+  if (!currentUser) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  state.textContent = 'Loading eligible campaigns…';
+  quota.textContent = 'Checking daily quota…';
+  list.replaceChildren();
+  try {
+    const response = await fetch('/api/whatsapp/campaigns/eligible');
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Campaign availability is unavailable.');
+    const quotaInfo = data.quota || { status: 'unavailable' };
+    quota.textContent = quotaInfo.status === 'available'
+      ? `Daily quota remaining: ${Number(quotaInfo.remaining)} / ${Number(quotaInfo.limit)}`
+      : 'Daily quota is currently unavailable.';
+    if (!data.campaigns?.length) {
+      state.textContent = 'No eligible automated WhatsApp campaigns are currently published.';
+      return;
+    }
+    state.textContent = data.advisory ? 'Available campaigns (advisory)' : 'Campaign availability';
+    list.innerHTML = data.campaigns.map(campaign => {
+      const availability = campaign.availability === 'available'
+        ? `${campaign.eligible_recipient_count} recipients available`
+        : campaign.availability === 'quota_unavailable'
+          ? 'Quota unavailable'
+          : 'No eligible recipients';
+      const choices = campaign.quantity_choices?.length ? `Choices: ${campaign.quantity_choices.join(', ')}` : 'No quantity currently available';
+      const quantityOptions = ['<option value="">Select quantity</option>', ...((campaign.quantity_choices || []).map(quantity => `<option value="${Number(quantity)}">${Number(quantity)} recipients</option>`))];
+      if (campaign.max_selectable_quantity && campaign.eligible_recipient_count <= campaign.max_selectable_quantity) quantityOptions.push('<option value="all">All eligible recipients</option>');
+      const controls = campaign.availability === 'available'
+        ? `<div class="mt-3 flex flex-col sm:flex-row gap-2">
+            <select class="whatsapp-campaign-quantity flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white" aria-label="Campaign quantity">${quantityOptions.join('')}</select>
+            <button type="button" class="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-slate-950" onclick="prepareWhatsAppCampaign(${Number(campaign.campaign_id)}, this)">Prepare campaign</button>
+          </div>
+          <p class="whatsapp-campaign-status mt-2 text-[11px] text-slate-400" aria-live="polite"></p>`
+        : '';
+      return `<article class="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+        <h3 class="font-bold text-white">${escapeHtml(campaign.title || 'Untitled campaign')}</h3>
+        <p class="text-xs text-slate-400 mt-1">${escapeHtml(campaign.task_type || 'Campaign')} · ${escapeHtml(availability)}</p>
+        <p class="text-xs text-slate-500 mt-2">${escapeHtml(choices)}</p>
+        <p class="text-[11px] text-slate-500 mt-2">Launching and sending are not available in this phase.</p>
+        ${controls}
+      </article>`;
+    }).join('');
+  } catch (error) {
+    quota.textContent = 'Daily quota is unavailable.';
+    state.textContent = error.message || 'Campaign availability is unavailable.';
+  }
+}
+
+function setWhatsAppConnectionControlsDisabled(disabled) {
+  ['whatsapp-connection-request-qr', 'whatsapp-connection-disconnect'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = disabled;
+  });
+}
+
+function renderWhatsAppConnectionStatus(data) {
+  const badge = document.getElementById('whatsapp-connection-status');
+  const message = document.getElementById('whatsapp-connection-message');
+  const qrPanel = document.getElementById('whatsapp-connection-qr');
+  const qrValue = document.getElementById('whatsapp-connection-qr-value');
+  if (!badge || !message || !qrPanel || !qrValue) return;
+  const status = String(data?.status || 'unknown');
+  badge.textContent = status;
+  badge.className = `inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${status === 'connected' ? 'border-emerald-500/50 text-emerald-300' : 'border-slate-700 text-slate-300'}`;
+  message.textContent = status === 'connected'
+    ? 'Linked device connected. Automated sending is still disabled.'
+    : status === 'qr'
+      ? 'A pairing payload is available for the approved test account.'
+      : `Linked-device status: ${status}.`;
+  if (data?.qr) {
+    qrValue.textContent = String(data.qr);
+    qrPanel.classList.remove('hidden');
+  } else {
+    qrValue.textContent = '';
+    qrPanel.classList.add('hidden');
+  }
+}
+
+async function loadWhatsAppConnectionStatus() {
+  const card = document.getElementById('whatsapp-connection-card');
+  const message = document.getElementById('whatsapp-connection-message');
+  if (!card || !message) return;
+  if (!currentUser) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  setWhatsAppConnectionControlsDisabled(false);
+  message.textContent = 'Checking linked-device availability…';
+  try {
+    const response = await fetch('/api/whatsapp/connection/status', {cache: 'no-store'});
+    const data = await response.json();
+    if (response.status === 404) {
+      setWhatsAppConnectionControlsDisabled(true);
+      const badge = document.getElementById('whatsapp-connection-status');
+      if (badge) badge.textContent = 'disabled';
+      message.textContent = 'Linked-device connection is disabled in this environment. No pairing or sending can occur.';
+      return;
+    }
+    if (!response.ok || !data.success) throw new Error(data.message || 'Linked-device status is unavailable.');
+    renderWhatsAppConnectionStatus(data);
+  } catch (error) {
+    setWhatsAppConnectionControlsDisabled(true);
+    const badge = document.getElementById('whatsapp-connection-status');
+    if (badge) badge.textContent = 'unavailable';
+    message.textContent = error.message || 'Linked-device status is unavailable.';
+  }
+}
+
+async function requestWhatsAppConnectionQr() {
+  const message = document.getElementById('whatsapp-connection-message');
+  try {
+    const csrf = window.__TASKPE_CSRF__ || await refreshCsrfToken();
+    const response = await fetch('/api/whatsapp/connection/qr', {method: 'POST', headers: {'X-CSRF-Token': csrf}});
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to request a pairing payload.');
+    renderWhatsAppConnectionStatus(data);
+  } catch (error) {
+    if (message) message.textContent = error.message || 'Unable to request a pairing payload.';
+  }
+}
+
+async function disconnectWhatsAppConnection() {
+  const message = document.getElementById('whatsapp-connection-message');
+  try {
+    const csrf = window.__TASKPE_CSRF__ || await refreshCsrfToken();
+    const response = await fetch('/api/whatsapp/connection/disconnect', {method: 'POST', headers: {'X-CSRF-Token': csrf}});
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to disconnect the linked device.');
+    renderWhatsAppConnectionStatus({status: 'disconnected'});
+  } catch (error) {
+    if (message) message.textContent = error.message || 'Unable to disconnect the linked device.';
+  }
+}
+
+async function prepareWhatsAppCampaign(campaignId, button) {
+  const card = button?.closest('article');
+  const quantitySelect = card?.querySelector('.whatsapp-campaign-quantity');
+  const status = card?.querySelector('.whatsapp-campaign-status');
+  const selected = quantitySelect?.value;
+  if (!selected) {
+    if (status) status.textContent = 'Select a quantity first.';
+    return;
+  }
+  const csrf = window.__TASKPE_CSRF__ || await refreshCsrfToken();
+  const workerScope = Number(currentUser?.id || currentUser?.user_id || 0);
+  const storageKey = `taskpe-wa-plan-v1:${workerScope}:${Number(campaignId)}:${selected}`;
+  let idempotencyKey = null;
+  try {
+    idempotencyKey = sessionStorage.getItem(storageKey);
+  } catch (error) {
+    idempotencyKey = null;
+  }
+  if (!idempotencyKey) {
+    idempotencyKey = `ui-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`;
+    try {
+      sessionStorage.setItem(storageKey, idempotencyKey);
+    } catch (error) {
+      // The server remains authoritative; an unavailable browser store only
+      // limits recovery across a page reload.
+    }
+  }
+  button.disabled = true;
+  if (status) status.textContent = 'Preparing campaign reservation…';
+  try {
+    const response = await fetch('/api/whatsapp/campaigns/prepare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify({campaign_id: Number(campaignId), quantity: selected === 'all' ? 'all' : Number(selected), idempotency_key: idempotencyKey}),
+    });
+    const data = await response.json();
+    if (response.status === 202 || data.status === 'recovery_required') {
+      if (status) status.textContent = 'Reservation is uncertain and requires recovery. No message was sent.';
+    } else if (!response.ok || !data.success || data.status !== 'reserved') {
+      if ([400, 404, 409].includes(response.status)) {
+        try { sessionStorage.removeItem(storageKey); } catch (error) { /* no-op */ }
+      }
+      throw new Error(data.message || 'Campaign reservation was not completed.');
+    } else if (status) {
+      try { sessionStorage.removeItem(storageKey); } catch (error) { /* no-op */ }
+      status.textContent = 'Campaign reserved successfully. Sending is not enabled in this phase.';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || 'Campaign reservation is unavailable.';
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1743,6 +2002,10 @@ async function handleCreateTaskSubmit(e) {
     form.set('description', description); form.set('template_text', template_text); form.set('target_numbers', target_numbers);
     form.set('total_slots', total_slots); form.set('recipients_per_slot', recipients_per_slot); form.set('time_limit_minutes', time_limit_minutes);
     form.set('proof_instructions', proof_instructions); form.set('use_default_reward', useDefaultReward ? '1' : '0');
+    const shopName = (document.getElementById('newtask-shop-name')?.value || '').trim();
+    if (shopName) form.set('shop_name', shopName);
+    const counterDeclaration = document.getElementById('newtask-counter-declaration')?.checked ? '1' : '0';
+    form.set('counter_declaration_confirmed', counterDeclaration);
     if (reward) form.set('reward_per_number', reward);
     if (imageTask) { form.set('destination_link', document.getElementById('newtask-link').value.trim()); const image = document.getElementById('newtask-image').files[0]; if (image) form.set('campaign_image', image); }
     const res = await fetch('/api/admin/tasks/create', {

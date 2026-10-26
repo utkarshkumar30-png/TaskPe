@@ -1,0 +1,71 @@
+name: TaskPe release candidate Linux validation
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TASKPE_WA_CAMPAIGN_BATCH_HTTP_SEND_ENABLED: "0"
+      TASKPE_WHATSAPP_LINKED_DEVICE_ENABLED: "0"
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Python dependencies and test runner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Check deployment shell syntax
+        run: bash -n deploy.sh
+
+      - name: Run deployment safety tests
+        run: pytest -q test_deployment_safety_validation.py
+
+      - name: Run schema and migration tests
+        run: |
+          pytest -q test_consent_schema_verification.py
+          pytest -q test_whatsapp_consent_declaration_migration.py
+
+      - name: Run consent, campaign, recipient, and integration tests
+        run: |
+          pytest -q test_phone_normalization.py test_recipient_eligibility.py
+          pytest -q test_shop_declaration_consent.py test_business_campaign_creation.py
+          pytest -q test_target_number_records.py
+          pytest -q test_whatsapp_campaign_e2e_verification.py
+          pytest -q test_whatsapp_flask_node_integration.py
+          pytest -q test_whatsapp_linked_device.py
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall -q \
+            app.py database.py wsgi.py \
+            migrate_whatsapp_consent_declaration_history.py
+
+      - name: Run Node service tests
+        run: npm test
