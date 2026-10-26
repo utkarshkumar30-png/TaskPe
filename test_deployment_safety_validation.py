@@ -545,7 +545,8 @@ class TestDeploymentSafetyValidation(unittest.TestCase):
         res = self._run_script(self.rollback_script, [rec_path])
         self.assertNotEqual(res.returncode, 0)
 
-    def test_database_restore_guard(self):        """Database restore strictly requires 'RESTORE_DATABASE' confirmation."""
+    def test_database_restore_guard(self):
+        """Database restore strictly requires 'RESTORE_DATABASE' confirmation."""
         rec_path = os.path.join(self.test_root, "db_test.record")
         snap_path = os.path.join(self.test_root, "snapshot.db")
         conn = sqlite3.connect(snap_path)
